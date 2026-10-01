@@ -1,9 +1,11 @@
 # Add to ~/portfolio-manager: COMPOSE_FILE=docker-compose.yml:docker-compose.trader.yml in .env.
+# Built on the Pi from ./trader (the repo is private, so no published image).
 # Reads the same data/ the dashboard reads; writes data/trade-suggestions.json.
 services:
   trader:
-    image: ghcr.io/justintimefordinner-lang/portfolio-trader:${IMAGE_TAG:-latest}
-    pull_policy: always
+    build: ./trader
+    image: portfolio-trader:local
+    pull_policy: never
     restart: unless-stopped
     user: "${UID:-1000}:${GID:-1000}"
     environment:

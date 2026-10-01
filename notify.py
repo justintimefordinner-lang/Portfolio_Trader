@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import os
 
-import requests
-
 PRIORITY = {"close": "high", "csp": "default", "cc": "default", "note": "low"}
 TAGS = {"close": "white_check_mark", "csp": "moneybag", "cc": "phone", "note": "warning"}
 
@@ -42,6 +40,8 @@ def push(s: dict, cfg: dict | None = None, timeout: float = 15.0) -> bool:
         link = f"{cfg['app_url']}/trader"
         headers["Click"] = link
         headers["Actions"] = f"view, Open in app, {link}"
+    import requests  # here, so the offline self-test needs no network stack
+
     try:
         r = requests.post(f"{cfg['url']}/{cfg['topic']}", data=body.encode("utf-8"), headers=headers, timeout=timeout)
         return 200 <= r.status_code < 300
