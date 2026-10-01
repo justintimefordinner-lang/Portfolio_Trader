@@ -1,14 +1,12 @@
 # Add to the dashboard stack folder: COMPOSE_FILE=docker-compose.yml:docker-compose.trader.yml in .env.
-# Reads the same data/ the dashboard reads; writes data/trade-suggestions.json.
-#
-# While the repo is private there is no published image: copy the repo to ./trader
-# and `docker compose up -d --build trader`. Once it is public, `docker compose pull
-# trader` works and the build block is only used when ./trader exists.
+# Reads the same data/ the dashboard reads; writes data/trade-suggestions.json,
+# data/trader-paper.json and the Auto Trader account in data/manual_positions.json.
+# Pulled from the registry like the dashboard and bridge, so the stack's updater
+# (Settings → Update now) keeps it current.
 services:
   trader:
     image: ghcr.io/justintimefordinner-lang/portfolio-trader:${IMAGE_TAG:-latest}
-    build: ./trader
-    pull_policy: missing
+    pull_policy: always
     restart: unless-stopped
     user: "${UID:-1000}:${GID:-1000}"
     environment:

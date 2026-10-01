@@ -23,29 +23,19 @@ dashboard's Trader page shows so you can mark each one good, bad or done.
 
 ## Install (alongside the dashboard stack)
 
-While this repo is private there is no published image, so the Pi builds one from a copy of this folder. From the
-machine that has the repo, copy it into the stack folder (re-run this to update):
+The image is published to GHCR on every push, for amd64 and arm64, so the stack pulls it like the dashboard and bridge. In the
+stack folder on the host, once:
 
 ```bash
-scp -r /path/to/Portfolio_Trader <user>@<your-pi>:~/portfolio-manager/trader
+cd ~/portfolio-manager && curl -fsSL https://raw.githubusercontent.com/justintimefordinner-lang/Portfolio_Trader/main/docker-compose.trader.yml -o docker-compose.trader.yml && mkdir -p trader-state bridge-state/task_inbox && { [ -f trader-state/.env ] || curl -fsSL https://raw.githubusercontent.com/justintimefordinner-lang/Portfolio_Trader/main/.env.example -o trader-state/.env; } && { grep -q "^COMPOSE_FILE=" .env || echo "COMPOSE_FILE=docker-compose.yml:docker-compose.trader.yml" >> .env; }
 ```
 
-On the Pi, once:
+Edit `trader-state/.env`: set `NTFY_TOPIC` to a long random name and `APP_URL` to how you reach the dashboard. Then start:
 
 ```bash
-cd ~/portfolio-manager && cp trader/docker-compose.trader.yml . && mkdir -p trader-state && cp -n trader/.env.example trader-state/.env && grep -q "^COMPOSE_FILE=" .env || echo "COMPOSE_FILE=docker-compose.yml:docker-compose.trader.yml" >> .env
+cd ~/portfolio-manager && docker compose pull trader && docker compose up -d trader && docker compose logs --tail 5 trader
 ```
 
-Edit `trader-state/.env`: set `NTFY_TOPIC` to a long random name and `APP_URL` to how you reach the dashboard. Then build and start:
-
-```bash
-cd ~/portfolio-manager && docker compose up -d --build trader && docker compose logs --tail 5 trader
-```
-
-After each update: scp again, then press **Rebuild trader** on the dashboard's Trader page (the release stack's updater builds the copied folder and restarts the trader), or from the Pi:
-
-```bash
-cd ~/portfolio-manager && cp trader/docker-compose.trader.yml . && docker compose up -d --build trader && docker compose logs --tail 5 trader
-```
+Updates: Settings → Update now in the dashboard pulls the newest trader image along with the others.
 
 On your phone, install the ntfy app and subscribe to the same topic. Pause pushes any time with `touch trader-state/paused`.
