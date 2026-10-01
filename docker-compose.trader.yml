@@ -16,3 +16,6 @@ services:
     volumes:
       - ./trader-state:/state
       - ./data:/app/data
+      # The bridge's task inbox, so the trader can ask for a fresh Quant scan when
+      # its entry window opens. Nothing else of the bridge's state is visible here.
+      - ./bridge-state/task_inbox:/app/task_inbox

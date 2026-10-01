@@ -35,9 +35,7 @@ def push(s: dict, cfg: dict | None = None, timeout: float = 15.0) -> bool:
     }
     if cfg["token"]:
         headers["Authorization"] = f"Bearer {cfg['token']}"
-    body = s["detail"] + (f"
-
-Rule: {s['rule']}" if s.get("rule") else "")
+    body = s["detail"] + (f"\n\nRule: {s['rule']}" if s.get("rule") else "")
     if cfg["app_url"]:
         link = f"{cfg['app_url']}/trader"
         headers["Click"] = link

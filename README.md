@@ -4,15 +4,17 @@ Companion to the [Portfolio dashboard](https://github.com/justintimefordinner-la
 dashboard's quant rules into trade **suggestions** and pushes them to your phone with [ntfy](https://ntfy.sh). It places no orders and
 holds no broker credentials.
 
-What it suggests, every 15 minutes during the session:
+What it suggests:
 
-- new cash-secured puts from the Quant scan, sized to the account and ranked by the Morning Brief's score;
-- short puts to close once 50% of the credit is captured;
-- covered calls on 100+ share lots with no call on;
-- notes when a name is over its cap or collateral exceeds cash.
+- short puts to close once 50% of the credit is captured — checked every 15 minutes, all session;
+- once a day, in the 11:00–12:30 ET entry window (the backtest traded at 11:00 ET): new cash-secured puts for every name the Quant
+  scan qualifies, sized to the account; covered calls on 100+ share lots with no call on; notes when a name is over its cap or
+  collateral exceeds cash. When the window opens the trader asks the bridge for a fresh scan and waits for it.
 
-Each is pushed once (again after a day, or if the price moves 15%), and logged to `data/trade-suggestions.json`, which the dashboard's
-Trader page shows so you can mark each one good, bad or done.
+The dashboard's Trader page has a **Run now** button for a full pass any time, any day, against the scan on disk.
+
+Each suggestion is pushed once (again after a day, or if the price moves 15%), and logged to `data/trade-suggestions.json`, which the
+dashboard's Trader page shows so you can mark each one good, bad or done.
 
 ## Install (alongside the dashboard stack)
 
@@ -35,6 +37,10 @@ Edit `trader-state/.env`: set `NTFY_TOPIC` to a long random name and `APP_URL` t
 cd ~/portfolio-manager && docker compose up -d --build trader && docker compose logs --tail 5 trader
 ```
 
-After each update: scp again, then the same `up -d --build trader`.
+After each update: scp again, then
+
+```bash
+cd ~/portfolio-manager && cp trader/docker-compose.trader.yml . && docker compose up -d --build trader && docker compose logs --tail 5 trader
+```
 
 On your phone, install the ntfy app and subscribe to the same topic. Pause pushes any time with `touch trader-state/paused`.

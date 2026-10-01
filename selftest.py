@@ -7,7 +7,7 @@ import os
 import sys
 import tempfile
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 FAILED: list[str] = []
 
@@ -58,6 +58,9 @@ def main() -> int:
         {"sym": "MU", "price": 1000, "pick": pick(900, 35, far, 45.0, 5.0, 0.33, 90_000), "best": None, "reason": "ok", "erDate": soon, "erDays": 12, "erInWindow": True},
         {"sym": "FTNT", "price": 185, "pick": pick(170, 30, far, 7.0, 4.1, 0.30, 17_000), "best": None, "reason": "ok", "erDate": None, "erDays": None, "erInWindow": False},
         {"sym": "BIG", "price": 2000, "pick": pick(1900, 35, far, 80.0, 4.2, 0.3, 190_000), "best": None, "reason": "ok", "erDate": None, "erDays": None, "erInWindow": False},
+    ] + [  # six more that qualify: the backtest took every name with room, so must we
+        {"sym": f"X{i}", "price": 50, "pick": pick(45, 35, far, 2.0, 4.4, 0.30, 4_500), "best": None, "reason": "ok", "erDate": None, "erDays": None, "erInWindow": False}
+        for i in range(6)
     ]}
     json.dump(scan, open(os.path.join(data, "quant-scan.json"), "w"))
     json.dump({"board": [], "screened": [{"sym": "FTNT", "score": 90, "tier": "S"}, {"sym": "KLAC", "score": 70, "tier": "A"}]}, open(os.path.join(data, "am_report.json"), "w"))
@@ -81,7 +84,10 @@ def main() -> int:
     check("MU skipped: earnings inside the put", ("csp", "MU") not in kinds)
     check("BIG skipped: one contract is over the per-name cap", ("csp", "BIG") not in kinds)
     csps = [s for s in sug if s["kind"] == "csp"]
-    check("FTNT (Brief 90) ranks above KLAC (70) despite lower yield", [s["symbol"] for s in csps] == ["FTNT", "KLAC"], str([s["symbol"] for s in csps]))
+    check("every qualifying name is suggested — no cap on the count", len(csps) == 8, str([s["symbol"] for s in csps]))
+    check("FTNT (Brief 90) ranks above KLAC (70) despite lower yield", [s["symbol"] for s in csps][:2] == ["FTNT", "KLAC"], str([s["symbol"] for s in csps]))
+    closes_only = suggest.build(suggest.load_context(data), None, today=date.today(), entries=False)
+    check("outside the window only closes are built", {s["kind"] for s in closes_only} == {"close"}, str({s["kind"] for s in closes_only}))
     klac = next(s for s in csps if s["symbol"] == "KLAC")
     check("KLAC sized to 5 contracts under the $100k per-name cap", klac["qty"] == 5, str(klac["qty"]))
     cc = next((s for s in sug if s["kind"] == "cc"), None)
@@ -92,37 +98,63 @@ def main() -> int:
     print("pushes + the file")
     sent_bodies: list[dict] = []
     notify.push = lambda s, cfg=None, timeout=15.0: (sent_bodies.append(s) or True)  # type: ignore[assignment]
-    r1 = trader.run_once(force=True, now=time.time())
+    r1 = trader.run_once(force=True, now=time.time(), entries=True)
     check("first pass pushes every new suggestion", r1["pushed"] == len(sug) and len(sent_bodies) == len(sug), str(r1))
-    r2 = trader.run_once(force=True, now=time.time() + 60)
+    r2 = trader.run_once(force=True, now=time.time() + 60, entries=True)
     check("second pass a minute later pushes nothing", r2["pushed"] == 0, str(r2))
-    r3 = trader.run_once(force=True, now=time.time() + 25 * 3600)
+    # 10:00 ET, before the window: closes only, and the morning's puts are NOT expired by their absence
+    before = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
+    r2b = trader.run_once(force=True, now=time.time() + 120, when=before)
+    doc = json.load(open(os.path.join(data, "trade-suggestions.json")))
+    check("before the window: closes only, puts from the window still stand", r2b["entries"] is False and all(s["status"] == "new" for s in doc["suggestions"] if s["kind"] == "csp"), str(r2b))
+    # 11:30 ET with a scan that is not fresh: wait, and ask the bridge for one
+    trader.INBOX_DIR = os.path.join(work, "inbox")
+    os.makedirs(trader.INBOX_DIR)
+    inwin = datetime(2026, 10, 1, 15, 30, tzinfo=timezone.utc)
+    r2c = trader.run_once(force=True, now=time.time() + 180, when=inwin)
+    check("in the window with a stale scan: waiting, scan requested", r2c.get("waiting") == "scan" and os.path.exists(os.path.join(trader.INBOX_DIR, "quant_scan")), str(r2c))
+    scan["meta"]["asOf"] = "2026-10-01T15:05:00+00:00"
+    json.dump(scan, open(os.path.join(data, "quant-scan.json"), "w"))
+    r2d = trader.run_once(force=True, now=time.time() + 240, when=inwin)
+    check("in the window with a fresh scan: entries built", r2d["entries"] is True, str(r2d))
+    r3 = trader.run_once(force=True, now=time.time() + 25 * 3600, entries=True)
     check("a day later, still-standing suggestions are re-sent", r3["pushed"] == len(sug), str(r3))
+    open(os.path.join(data, "trader-run"), "w").close()
+    sent_bodies.clear()
+    check("Run now: marker consumed, full pass", trader.run_requested() and not os.path.exists(os.path.join(data, "trader-run")) and json.load(open(os.path.join(data, "trade-suggestions.json")))["meta"]["lastPass"] == "run now")
     doc = json.load(open(os.path.join(data, "trade-suggestions.json")))
     check("file lists them as new with pushedAt", all(s["status"] == "new" and s.get("pushedAt") for s in doc["suggestions"]))
     # the app marks one as done; the trader respects it and stops pushing it
     json.dump({klac["key"]: {"status": "done", "at": datetime.now().isoformat()}}, open(os.path.join(data, "trade-feedback.json"), "w"))
     sent_bodies.clear()
-    trader.run_once(force=True, now=time.time() + 50 * 3600)
+    trader.run_once(force=True, now=time.time() + 50 * 3600, entries=True)
     doc = json.load(open(os.path.join(data, "trade-suggestions.json")))
     check("app's verdict wins and silences the push", next(s for s in doc["suggestions"] if s["key"] == klac["key"])["status"] == "done" and not any(b["key"] == klac["key"] for b in sent_bodies))
     # a suggestion that stops applying is marked expired, not deleted
     scan["rows"] = [r for r in scan["rows"] if r["sym"] != "FTNT"]
     json.dump(scan, open(os.path.join(data, "quant-scan.json"), "w"))
-    trader.run_once(force=True, now=time.time() + 50 * 3600)
+    trader.run_once(force=True, now=time.time() + 50 * 3600, entries=True)
     doc = json.load(open(os.path.join(data, "trade-suggestions.json")))
     check("gone from the scan -> expired, kept in the log", next(s for s in doc["suggestions"] if s["symbol"] == "FTNT" and s["kind"] == "csp")["status"] == "expired")
     open(os.path.join(work, "paused"), "w").close()
     sent_bodies.clear()
-    trader.run_once(force=True, now=time.time() + 80 * 3600)
+    trader.run_once(force=True, now=time.time() + 80 * 3600, entries=True)
     check("paused: nothing pushed", not sent_bodies)
-    try:
-        from zoneinfo import ZoneInfo
-        ZoneInfo("America/New_York")
-        check("market_open false on a Sunday", not trader.market_open(datetime(2026, 10, 4, 15, 0, tzinfo=__import__("datetime").timezone.utc)))
-        check("market_open true on a Thursday at 2pm ET", trader.market_open(datetime(2026, 10, 1, 18, 0, tzinfo=__import__("datetime").timezone.utc)))
-    except Exception:  # noqa: BLE001 — no tz database here (a browser Python); CI has one
-        print("  skip  market hours (no time-zone database)")
+
+    print("clock (Eastern, no tz database needed)")
+    utc = timezone.utc
+    check("market_open false on a Sunday", not trader.market_open(datetime(2026, 10, 4, 15, 0, tzinfo=utc)))
+    check("market_open true on a Thursday at 2pm ET", trader.market_open(datetime(2026, 10, 1, 18, 0, tzinfo=utc)))
+    check("window: 11:30 EDT in", trader.in_entry_window(datetime(2026, 10, 1, 15, 30, tzinfo=utc)))
+    check("window: 10:30 EDT out", not trader.in_entry_window(datetime(2026, 10, 1, 14, 30, tzinfo=utc)))
+    check("window: 12:30 EDT out (end exclusive)", not trader.in_entry_window(datetime(2026, 10, 1, 16, 30, tzinfo=utc)))
+    check("window: 11:30 EST in (December)", trader.in_entry_window(datetime(2026, 12, 3, 16, 30, tzinfo=utc)))
+    check("window: 10:30 EST out (December)", not trader.in_entry_window(datetime(2026, 12, 3, 15, 30, tzinfo=utc)))
+    check("window: closed on Saturday", not trader.in_entry_window(datetime(2026, 10, 3, 15, 30, tzinfo=utc)))
+    at = datetime(2026, 10, 1, 15, 30, tzinfo=utc)
+    check("scan 25 min before the window start is fresh", trader.scan_fresh({"meta": {"asOf": "2026-10-01T14:35:00+00:00"}}, at))
+    check("scan 40 min before the window start is stale", not trader.scan_fresh({"meta": {"asOf": "2026-10-01T14:20:00+00:00"}}, at))
+    check("no scan is stale", not trader.scan_fresh(None, at))
 
     print()
     if FAILED:

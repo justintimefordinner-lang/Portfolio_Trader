@@ -6,10 +6,11 @@ VIX), applies the same rules the dashboard's Quant pages apply, and returns a
 list of suggestions. Nothing here talks to a broker or a phone.
 
 The rules (the wheel study's combo 87 with 0.75-delta LEAPS):
-  * new CSP: the scan's pick for a name, sized against this account — the
-    smallest of free cash, room under the 10% per-name cap (15% stretch when
-    adding) and room under buying power, in whole contracts; skipped when it
-    spans earnings or the name is already at its cap
+  * new CSP: the scan's pick for every name that qualifies (no cap on how many,
+    like the backtest), sized against this account — the smallest of free cash,
+    room under the 10% per-name cap (15% stretch when adding) and room under
+    buying power, in whole contracts; skipped when it spans earnings or the
+    name is already at its cap. Built only in the entry window (trader.py).
   * close a short put once 50% of its credit is captured
   * on 100+ shares with no call: a 7–21 day call at or above cost, the furthest
     strike still paying 0.5% of basis a week (from the bridge's ladder)
@@ -26,7 +27,6 @@ CASH_EQUIVALENTS = {"SWVXX", "SNVXX", "SNSXX", "SNOXX", "SWGXX", "SNAXX", "SGUXX
 R = {
     "closeAt": 0.5, "maxPerTicker": 0.10, "tickerBand": 0.05,
     "callMinDte": 7, "callMaxDte": 21, "callWeeklyMin": 0.005,
-    "maxNewCsp": 5,
 }
 
 
@@ -151,7 +151,8 @@ def _money(n: float) -> str:
     return f"${round(n):,}"
 
 
-def build(ctx: dict, account_id: str | None = None, today: date | None = None) -> list[dict]:
+def build(ctx: dict, account_id: str | None = None, today: date | None = None, entries: bool = True) -> list[dict]:
+    """All suggestions, or with entries=False just the closes (what runs outside the entry window)."""
     snap = ctx.get("snapshot")
     if not snap or not snap.get("data"):
         return []
@@ -181,7 +182,12 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None) -
                 "rule": "close at 50%",
             })
 
-    # 2. New CSPs from the scan, ranked by the Brief's score then yield.
+    if not entries:
+        for s in out:
+            s["accountId"] = acct_id
+        return out
+
+    # 2. New CSPs from the scan: every name that qualifies, in Brief-score then yield order.
     scan = ctx.get("scan") or {}
     report = ctx.get("report") or {}
     scored = {r["sym"]: r for r in (report.get("screened") or report.get("board") or [])}
@@ -198,7 +204,7 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None) -
         score = (scored.get(row["sym"]) or {}).get("score")
         picks.append((-(score if score is not None else -1), -p["yield30"], row, p, f, score))
     picks.sort(key=lambda t: (t[0], t[1]))
-    for _, _, row, p, f, score in picks[: R["maxNewCsp"]]:
+    for _, _, row, p, f, score in picks:
         n = f["contracts"]
         out.append({
             "key": f"csp|{row['sym']}|{p['strike']}|{p['exp']}",
