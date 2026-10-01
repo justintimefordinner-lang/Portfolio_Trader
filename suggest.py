@@ -131,12 +131,13 @@ def committed_total(acct: dict) -> float:
     return sum(committed(s, acct) for s in syms)
 
 
-def fit(pick: dict, sym: str, acct: dict, cap: dict) -> dict:
-    """How many contracts the rules allow, plus the flags the dashboard shows."""
+def fit(pick: dict, sym: str, acct: dict, cap: dict, taken: float = 0.0) -> dict:
+    """How many contracts the rules allow, plus the flags the dashboard shows.
+    `taken` is collateral already handed to earlier picks in the same pass."""
     c = committed(sym, acct)
     per_cap = R["maxPerTicker"] * cap["buyingPower"]
     room_ticker = per_cap - c
-    room_total = cap["buyingPower"] - committed_total(acct)
+    room_total = cap["buyingPower"] - committed_total(acct) - taken
     room = min(room_ticker, room_total, cap["freeCash"])
     contracts = int(room // pick["collateral"]) if room > 0 else 0
     if contracts < 1 and room_ticker > 0:
@@ -151,8 +152,9 @@ def _money(n: float) -> str:
     return f"${round(n):,}"
 
 
-def build(ctx: dict, account_id: str | None = None, today: date | None = None, entries: bool = True) -> list[dict]:
-    """All suggestions, or with entries=False just the closes (what runs outside the entry window)."""
+def build(ctx: dict, account_id: str | None = None, today: date | None = None, entries: bool = True, cap: dict | None = None) -> list[dict]:
+    """All suggestions, or with entries=False just the closes (what runs outside the entry window).
+    `cap` overrides the capacity worked out from the snapshot (the paper account keeps its own)."""
     snap = ctx.get("snapshot")
     if not snap or not snap.get("data"):
         return []
@@ -161,7 +163,7 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
     if not acct:
         return []
     vix = ((ctx.get("vix") or {}).get("inputs") or {}).get("vix")
-    cap = capacity(acct, vix)
+    cap = cap or capacity(acct, vix)
     today = today or date.today()
     out: list[dict] = []
 
@@ -198,14 +200,18 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
             continue
         if _dte(p["exp"], today) < 20:
             continue  # a stale scan: the contract is no longer in the window
-        f = fit(p, row["sym"], acct, cap)
+        score = (scored.get(row["sym"]) or {}).get("score")
+        picks.append((-(score if score is not None else -1), -p["yield30"], row, p, score))
+    picks.sort(key=lambda t: (t[0], t[1]))
+    # Capital is handed out in that order, each pick seeing what the ones before it
+    # took, so a day with room for one put suggests one — the best ranked — not four.
+    spent = 0.0
+    for _, _, row, p, score in picks:
+        f = fit(p, row["sym"], acct, {**cap, "freeCash": cap["freeCash"] - spent}, spent)
         if f["contracts"] < 1 or f["full"]:
             continue
-        score = (scored.get(row["sym"]) or {}).get("score")
-        picks.append((-(score if score is not None else -1), -p["yield30"], row, p, f, score))
-    picks.sort(key=lambda t: (t[0], t[1]))
-    for _, _, row, p, f, score in picks:
         n = f["contracts"]
+        spent += p["collateral"] * n
         out.append({
             "key": f"csp|{row['sym']}|{p['strike']}|{p['exp']}",
             "kind": "csp", "symbol": row["sym"], "strike": p["strike"], "expiration": p["exp"],

@@ -32,6 +32,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 
 import notify
+import paper
 import suggest
 
 DATA_DIR = os.environ.get("APP_DATA_DIR", "/app/data")
@@ -200,6 +201,19 @@ def run_once(force: bool = False, now: float | None = None, entries: bool | None
         _write(DAY_FILE, day)
     evaluated = set(ENTRY_KINDS) | {"close"} if entries else {"close"}
 
+    # The Auto Trader paper account: same rules, booked as trades, entries once a day.
+    paper_meta = None
+    if paper.ENABLED:
+        try:
+            paper_entries = entries and day.get("paperEntries") != today
+            paper_meta = paper.run(ctx, DATA_DIR, entries=paper_entries, today=to_et(when).date(),
+                                   vix=((ctx.get("vix") or {}).get("inputs") or {}).get("vix"))
+            if paper_entries:
+                day = {**day, "paperEntries": today}
+                _write(DAY_FILE, day)
+        except Exception as exc:  # noqa: BLE001 — the paper book must never block the live suggestions
+            _log(f"paper: ERROR - {exc}")
+
     out_path = os.path.join(DATA_DIR, OUT_FILE)
     existing = {s["key"]: s for s in (_read(out_path, {}) or {}).get("suggestions", [])}
     feedback = _read(os.path.join(DATA_DIR, FEEDBACK_FILE), {}) or {}
@@ -238,6 +252,7 @@ def run_once(force: bool = False, now: float | None = None, entries: bool | None
         "meta": {"asOf": stamp, "interval": INTERVAL, "paused": paused, "ntfy": bool(cfg["topic"]),
                  "window": f"{ENTRY_WINDOW} ET", "entriesBuilt": day.get("entriesBuilt"),
                  "lastPass": "run now" if requested else ("entries" if entries else "closes"),
+                 "paper": paper_meta,
                  "active": sum(1 for r in rows if r["status"] == "new"), "pushed": pushed},
         "suggestions": rows,
     })

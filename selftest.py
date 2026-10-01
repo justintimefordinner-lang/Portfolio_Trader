@@ -86,6 +86,8 @@ def main() -> int:
     csps = [s for s in sug if s["kind"] == "csp"]
     check("every qualifying name is suggested — no cap on the count", len(csps) == 8, str([s["symbol"] for s in csps]))
     check("FTNT (Brief 90) ranks above KLAC (70) despite lower yield", [s["symbol"] for s in csps][:2] == ["FTNT", "KLAC"], str([s["symbol"] for s in csps]))
+    tight = suggest.build(suggest.load_context(data), None, today=date.today(), cap={**cap, "freeCash": 20_000})
+    check("room for one put: only the best-ranked name is suggested", [s["symbol"] for s in tight if s["kind"] == "csp"] == ["FTNT"], str([(s["symbol"], s["qty"]) for s in tight if s["kind"] == "csp"]))
     closes_only = suggest.build(suggest.load_context(data), None, today=date.today(), entries=False)
     check("outside the window only closes are built", {s["kind"] for s in closes_only} == {"close"}, str({s["kind"] for s in closes_only}))
     klac = next(s for s in csps if s["symbol"] == "KLAC")
@@ -140,6 +142,49 @@ def main() -> int:
     sent_bodies.clear()
     trader.run_once(force=True, now=time.time() + 80 * 3600, entries=True)
     check("paused: nothing pushed", not sent_bodies)
+
+    print("paper account")
+    import paper
+    paper.ENABLED = True
+    pday = date(2026, 10, 1)
+    paper.run(suggest.load_context(data), data, entries=True, today=pday, vix=16.3)
+    mdoc = json.load(open(os.path.join(data, "manual_positions.json")))
+    pacct = next(a for a in mdoc["accounts"] if a["id"] == paper.PAPER_ID)
+    puts = [p for p in pacct["positions"] if p["type"] == "option" and p["optionType"] == "put"]
+    # (the passes above already ran the paper book, so FTNT was sold before it left the scan)
+    check("Auto Trader created with $400k and every qualifying put sold", pacct["label"] == "Auto Trader" and len(puts) == 8, f"{len(puts)} puts: {[p['symbol'] for p in puts]}")
+    coll = sum(p["strike"] * 100 * p["qty"] for p in puts)
+    check("cash dropped by the collateral (manual model: a put is collateral + P/L)", abs(pacct["cash"] - (400_000 - coll)) < 1, f"{pacct['cash']:.0f} vs {400_000 - coll:.0f}")
+    paper.run(suggest.load_context(data), data, entries=True, today=pday, vix=16.3)
+    pacct = next(a for a in json.load(open(os.path.join(data, "manual_positions.json")))["accounts"] if a["id"] == paper.PAPER_ID)
+    check("a second entries pass the same day adds nothing (bridge view lagging)", len(pacct["positions"]) == 8, str(len(pacct["positions"])))
+    # Expiry and a 50% close, driven by the bridge's priced view of the account.
+    klac = next(p for p in pacct["positions"] if p["symbol"] == "KLAC")
+    pacct["positions"] += [
+        {"id": "exp1", "type": "option", "symbol": "HOOD", "optionType": "put", "side": "short", "qty": 1, "strike": 90, "expiration": "2026-09-25", "premium": 2.0, "openedAt": "2026-09-01"},
+        {"id": "exp2", "type": "option", "symbol": "SOFI", "optionType": "put", "side": "short", "qty": 2, "strike": 16, "expiration": "2026-09-25", "premium": 0.7, "openedAt": "2026-09-01"},
+    ]
+    paper.save_account(data, pacct)
+    cash0 = pacct["cash"]
+    opt = lambda pid, sym, strike, exp, entry, mark, under, qty: {"id": f"{paper.PAPER_ID}:{pid}", "kind": "csp", "symbol": sym, "optionType": "put", "side": "short", "qty": qty, "strike": strike, "expiration": exp, "entryPerShare": entry, "mark": mark, "delta": -0.2, "theta": 0, "iv": 0.5, "breakeven": 0, "underlyingPrice": under}
+    view = {"data": {paper.PAPER_ID: {"summary": {"totalValue": 401_000, "equityValue": 0, "cryptoValue": 0, "cash": cash0}, "equities": [], "valueHistory": [], "options": [
+        opt("exp1", "HOOD", 90, "2026-09-25", 2.0, 5.0, 85.0, 1),
+        opt("exp2", "SOFI", 16, "2026-09-25", 0.7, 0.0, 17.0, 2),
+        opt(klac["id"], "KLAC", 185, klac["expiration"], 8.85, 4.0, 200.0, klac["qty"]),
+    ]}}}
+    os.makedirs(os.path.join(data, "manual"), exist_ok=True)
+    json.dump(view, open(os.path.join(data, "manual", "snapshot.json"), "w"))
+    pm = paper.run(suggest.load_context(data), data, entries=False, today=pday, vix=16.3)
+    pacct = next(a for a in json.load(open(os.path.join(data, "manual_positions.json")))["accounts"] if a["id"] == paper.PAPER_ID)
+    hood_shares = next((p for p in pacct["positions"] if p["type"] == "stock" and p["symbol"] == "HOOD"), None)
+    check("ITM put assigned: 100 shares at strike − premium", hood_shares is not None and hood_shares["qty"] == 100 and hood_shares["avgCost"] == 88.0, str(hood_shares))
+    check("OTM put expired, KLAC closed at 50%: both gone", not any(p.get("id") in ("exp1", "exp2", klac["id"]) for p in pacct["positions"]))
+    expect_cash = cash0 + 2.0 * 100 + (16 + 0.7) * 100 * 2 + 185 * 100 * klac["qty"] + (8.85 - 4.0) * 100 * klac["qty"]
+    check("cash: premium kept on assignment, collateral + premium on expiry, collateral + gain on the close", abs(pacct["cash"] - expect_cash) < 1, f"{pacct['cash']:.0f} vs {expect_cash:.0f}")
+    closed = json.load(open(os.path.join(data, "manual", "csp-closed.json")))["closed"]
+    check("three CSP round-trips booked to the paper account", len(closed) == 3 and all(r["accountId"] == paper.PAPER_ID for r in closed) and {r["outcome"] for r in closed} == {"assigned", "expired", "closed_profit"}, str([(r["symbol"], r["outcome"], r["realizedPnl"]) for r in closed]))
+    plog = json.load(open(os.path.join(data, "trader-paper.json")))
+    check("trade log written with a summary", plog["meta"]["label"] == "Auto Trader" and len(plog["trades"]) == 8 + 3 and pm["shareLots"] == 1 and pm["puts"] == 7, str(plog["meta"]))
 
     print("clock (Eastern, no tz database needed)")
     utc = timezone.utc

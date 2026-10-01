@@ -13,6 +13,11 @@ What it suggests:
 
 The dashboard's Trader page has a **Run now** button for a full pass any time, any day, against the scan on disk.
 
+**Auto Trader (paper).** The same rules are also traded, without asking, in a manual account named Auto Trader funded with
+`PAPER_CASH` (default $400,000). New puts and calls are booked as positions, closes at 50% and expiries (assignment, called away,
+expired) are settled with the bridge's prices, and each round-trip lands in the account's realized P&L, so the dashboard shows the
+strategy's paper record under that account. Entries happen once a day, in the entry window or on Run now. `TRADER_PAPER=0` turns it off.
+
 Each suggestion is pushed once (again after a day, or if the price moves 15%), and logged to `data/trade-suggestions.json`, which the
 dashboard's Trader page shows so you can mark each one good, bad or done.
 
