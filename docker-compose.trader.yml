@@ -1,11 +1,14 @@
-# Add to ~/portfolio-manager: COMPOSE_FILE=docker-compose.yml:docker-compose.trader.yml in .env.
-# Built on the Pi from ./trader (the repo is private, so no published image).
+# Add to the dashboard stack folder: COMPOSE_FILE=docker-compose.yml:docker-compose.trader.yml in .env.
 # Reads the same data/ the dashboard reads; writes data/trade-suggestions.json.
+#
+# While the repo is private there is no published image: copy the repo to ./trader
+# and `docker compose up -d --build trader`. Once it is public, `docker compose pull
+# trader` works and the build block is only used when ./trader exists.
 services:
   trader:
+    image: ghcr.io/justintimefordinner-lang/portfolio-trader:${IMAGE_TAG:-latest}
     build: ./trader
-    image: portfolio-trader:local
-    pull_policy: never
+    pull_policy: missing
     restart: unless-stopped
     user: "${UID:-1000}:${GID:-1000}"
     environment:
