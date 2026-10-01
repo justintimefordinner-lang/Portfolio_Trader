@@ -1,0 +1,11 @@
+.git
+.env
+.env.*
+!.env.example
+sent.json
+paused
+*.log
+__pycache__
+*.pyc
+.venv
+README.md
