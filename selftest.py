@@ -85,7 +85,8 @@ def main() -> int:
     klac = next(s for s in csps if s["symbol"] == "KLAC")
     check("KLAC sized to 5 contracts under the $100k per-name cap", klac["qty"] == 5, str(klac["qty"]))
     cc = next((s for s in sug if s["kind"] == "cc"), None)
-    check("AAPL covered call: furthest strike paying 0.5%/wk, 7-21d", cc is not None and cc["strike"] == 215 and cc["qty"] == 2, json.dumps(cc)[:120] if cc else "none")
+    # 215/21d pays 2.5/180/3 = 0.46%/wk, under the floor; 210/14d pays 0.67%/wk. 30d is outside 7–21.
+    check("AAPL covered call: furthest strike paying 0.5%/wk, 7-21d", cc is not None and cc["strike"] == 210 and cc["qty"] == 2, json.dumps(cc)[:120] if cc else "none")
     check("no notes when inside the rules", not [s for s in sug if s["kind"] == "note"])
 
     print("pushes + the file")
@@ -115,7 +116,13 @@ def main() -> int:
     sent_bodies.clear()
     trader.run_once(force=True, now=time.time() + 80 * 3600)
     check("paused: nothing pushed", not sent_bodies)
-    check("market_open false on a Sunday", not trader.market_open(datetime(2026, 10, 4, 15, 0, tzinfo=__import__("datetime").timezone.utc)))
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo("America/New_York")
+        check("market_open false on a Sunday", not trader.market_open(datetime(2026, 10, 4, 15, 0, tzinfo=__import__("datetime").timezone.utc)))
+        check("market_open true on a Thursday at 2pm ET", trader.market_open(datetime(2026, 10, 1, 18, 0, tzinfo=__import__("datetime").timezone.utc)))
+    except Exception:  # noqa: BLE001 — no tz database here (a browser Python); CI has one
+        print("  skip  market hours (no time-zone database)")
 
     print()
     if FAILED:
