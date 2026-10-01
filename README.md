@@ -37,7 +37,7 @@ Edit `trader-state/.env`: set `NTFY_TOPIC` to a long random name and `APP_URL` t
 cd ~/portfolio-manager && docker compose up -d --build trader && docker compose logs --tail 5 trader
 ```
 
-After each update: scp again, then
+After each update: scp again, then press **Rebuild trader** on the dashboard's Trader page (the release stack's updater builds the copied folder and restarts the trader), or from the Pi:
 
 ```bash
 cd ~/portfolio-manager && cp trader/docker-compose.trader.yml . && docker compose up -d --build trader && docker compose logs --tail 5 trader
