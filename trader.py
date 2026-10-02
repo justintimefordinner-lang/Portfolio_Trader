@@ -109,6 +109,15 @@ def market_open(now: datetime | None = None) -> bool:
     return 570 <= mins < 960
 
 
+def active(now: datetime | None = None) -> bool:
+    """When the rules run on their own: market hours, from the first entry hour on.
+    The backtest managed its open puts in its 11:00 ET run, so closes wait for it too."""
+    if not market_open(now):
+        return False
+    et = to_et(now)
+    return not ENTRY_HOURS or et.hour >= min(ENTRY_HOURS)
+
+
 def current_slot(now: datetime | None = None) -> tuple[str, datetime] | None:
     """The entry slot `now` falls in: (key "YYYY-MM-DDTHH", the slot's start), or None."""
     et = to_et(now)
@@ -191,8 +200,8 @@ def run_once(force: bool = False, now: float | None = None, entries: bool | None
     """One pass. `entries` forces the entry half on/off (None = follow the slots). Returns a summary for the log and the self-test."""
     now = now or time.time()
     when = when or datetime.fromtimestamp(now, timezone.utc)
-    if not force and not market_open(when):
-        return {"skipped": "market closed"}
+    if not force and not active(when):
+        return {"skipped": "market closed" if not market_open(when) else f"before {min(ENTRY_HOURS):02d}:00 ET"}
     ctx = suggest.load_context(DATA_DIR)
     today = to_et(when).date().isoformat()
     day = _read(DAY_FILE, {}) or {}
@@ -240,7 +249,7 @@ def run_once(force: bool = False, now: float | None = None, entries: bool | None
         try:
             paper_meta = paper.run(ctx, DATA_DIR, entries=entries, today=to_et(when).date(),
                                    vix=((ctx.get("vix") or {}).get("inputs") or {}).get("vix"),
-                                   market_open=market_open(when))  # a Run now at 3 a.m. suggests; it does not fill
+                                   market_open=active(when))  # a Run now at 3 a.m. (or 10 a.m.) suggests; it does not fill
         except Exception as exc:  # noqa: BLE001 — the paper book must never block the live suggestions
             _log(f"paper: ERROR - {exc}")
 
@@ -322,17 +331,15 @@ def main() -> None:
     load_dotenv()
     cfg = notify.config()
     hours = ", ".join(f"{h:02d}:00" for h in ENTRY_HOURS) or "none"
-    _log(f"trader started — closes every {INTERVAL}s during the session, entries at {hours} ET for every account; ntfy "
+    _log(f"trader started — closes every {INTERVAL}s from {min(ENTRY_HOURS):02d}:00 ET to the close, entries at {hours} ET, every account; ntfy "
          + (f"{cfg['url']}/{cfg['topic'][:4]}…" if cfg["topic"] else "OFF (set NTFY_TOPIC)")
          + ("" if os.path.isdir(INBOX_DIR) else "; bridge inbox not mounted, relying on its scheduled scan"))
-    first = True
     next_pass = 0.0
     while True:
         try:
             if time.time() >= next_pass:
                 next_pass = time.time() + INTERVAL
-                _log(f"pass: {run_once(force=first)}")
-                first = False
+                _log(f"pass: {run_once()}")  # no forced pass at start-up: the clock decides, Run now overrides
             run_requested()
         except Exception as exc:  # noqa: BLE001 — never let one bad pass stop the loop
             _log(f"ERROR - {exc}")

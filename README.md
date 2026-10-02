@@ -6,7 +6,7 @@ holds no broker credentials.
 
 What it suggests:
 
-- short puts to close once 50% of the credit is captured — checked every 15 minutes, all session;
+- short puts to close once 50% of the credit is captured — checked every 15 minutes from 11:00 ET (the backtest managed its open puts in its 11:00 run) to the close;
 - at the top of each entry hour (11:00 to 15:00 ET, i.e. 9:00 to 1:00 Mountain): new cash-secured puts for every name the Quant
   scan qualifies, sized to the account; covered calls on 100+ share lots with no call on; notes when a name is over its cap or
   collateral exceeds cash. When a slot opens the trader asks the bridge for a fresh scan and waits for it.

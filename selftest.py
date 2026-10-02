@@ -225,6 +225,10 @@ def main() -> int:
     utc = timezone.utc
     check("market_open false on a Sunday", not trader.market_open(datetime(2026, 10, 4, 15, 0, tzinfo=utc)))
     check("market_open true on a Thursday at 2pm ET", trader.market_open(datetime(2026, 10, 1, 18, 0, tzinfo=utc)))
+    check("active: not at 10:30 ET (closes wait for the 11:00 run, like the backtest)", not trader.active(datetime(2026, 10, 1, 14, 30, tzinfo=utc)))
+    check("active: 11:00 ET on", trader.active(datetime(2026, 10, 1, 15, 0, tzinfo=utc)) and trader.active(datetime(2026, 10, 1, 19, 45, tzinfo=utc)))
+    check("active: not after the close", not trader.active(datetime(2026, 10, 1, 20, 5, tzinfo=utc)))
+    check("an unforced pass at 10:30 ET is skipped", trader.run_once(when=datetime(2026, 10, 1, 14, 30, tzinfo=utc)).get("skipped", "").startswith("before 11:00"))
     slot = lambda *a: (trader.current_slot(datetime(*a, tzinfo=utc)) or (None,))[0]
     check("slot: 11:30 EDT is the 11:00 slot", slot(2026, 10, 1, 15, 30) == "2026-10-01T11")
     check("slot: 10:30 EDT is none", slot(2026, 10, 1, 14, 30) is None)
