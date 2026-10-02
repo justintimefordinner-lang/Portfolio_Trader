@@ -292,7 +292,7 @@ def run_once(force: bool = False, now: float | None = None, entries: bool | None
                  "slots": ENTRY_HOURS, "entriesBuilt": day.get("entriesBuilt"),
                  "accounts": [suggest.account_label(a) for a in accts],
                  "lastPass": "run now" if requested else ("entries" if entries else "closes"),
-                 "paper": paper_meta,
+                 "paper": paper_meta, "build": (os.environ.get("BUILD_SHA") or "")[:7] or None,
                  "active": sum(1 for r in rows if r["status"] == "new"), "pushed": pushed},
         "suggestions": rows,
     })

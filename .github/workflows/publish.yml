@@ -38,6 +38,7 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
+          build-args: BUILD_SHA=${{ github.sha }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
       - run: mkdir -p /tmp/digests && touch "/tmp/digests/${DIGEST#sha256:}"

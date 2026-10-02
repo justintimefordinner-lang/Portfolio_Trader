@@ -6,6 +6,9 @@ LABEL org.opencontainers.image.source="https://github.com/justintimefordinner-la
 LABEL org.opencontainers.image.description="Trade suggestions from the Portfolio dashboard's quant rules, pushed via ntfy"
 RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates && rm -rf /var/lib/apt/lists/*
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 TRADER_STATE_DIR=/state APP_DATA_DIR=/app/data
+# The commit this image was built from (set by the publish workflow); shown on the Trader page.
+ARG BUILD_SHA=""
+ENV BUILD_SHA=$BUILD_SHA
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm -f /tmp/requirements.txt
 COPY . /opt/trader
