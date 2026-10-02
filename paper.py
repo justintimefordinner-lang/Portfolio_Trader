@@ -8,7 +8,9 @@ PAPER_CASH (default $400,000). Every pass the trader applies the same rules it
 applies to the live account, but to this one, and books the trades itself:
 
   * new CSP   → a short put row; cash drops by the collateral (the dashboard's
-                manual model carries a short put as collateral + P/L)
+                manual model carries a short put as collateral + P/L, so the
+                premium collected shows there, not in cash; the dashboard's
+                uncommitted cash adds it back, and so does the sizing here)
   * close 50% → the row goes; cash gets the collateral back plus the realized
                 credit − cost; a round-trip is written to data/manual/csp-closed.json
   * covered call → a short call row (its premium shows as P/L until it ends)
@@ -121,13 +123,20 @@ def _synthetic(acct: dict) -> dict:
             "equities": [], "options": [], "valueHistory": []}
 
 
+def credits(acct: dict) -> float:
+    """Premium collected on the open short options. In the manual model it lives in
+    the options' P/L, not in `cash`; at a broker it is cash, and the backtest spent it."""
+    return sum(p["premium"] * MULT * p["qty"] for p in acct["positions"] if p.get("type") == "option" and p.get("side") == "short")
+
+
 def capacity(acct: dict, snap_acct: dict | None, vix: float | None) -> dict:
-    """The dashboard's manual model keeps `cash` net of what secures the puts, so free cash is cash itself."""
+    """Free cash the way the dashboard and the backtest count it: cash beyond the
+    collateral, plus the premiums collected (the dashboard's uncommitted cash)."""
     total = float(((snap_acct or {}).get("summary") or {}).get("totalValue") or acct["cash"])
     margin = suggest.vix_margin(vix)
     collateral = sum(p["strike"] * MULT * p["qty"] for p in acct["positions"] if p.get("type") == "option" and p.get("side") == "short" and p.get("optionType") == "put")
     return {"totalValue": total, "margin": margin, "buyingPower": total * (1 + margin),
-            "freeCash": float(acct["cash"]) + margin * total, "putObligations": collateral}
+            "freeCash": float(acct["cash"]) + credits(acct) + margin * total, "putObligations": collateral}
 
 
 # ---- closed records, in the dashboard's shapes ------------------------------------
@@ -277,8 +286,8 @@ def apply(data_dir: str, acct: dict, suggestions: list[dict], today: date, when:
                 continue  # already on (the bridge's view lagged a pass), or sold one earlier today
             traded_today.add(s["symbol"])
             collateral = s["strike"] * MULT * s["qty"]
-            if collateral > acct["cash"]:
-                continue
+            if collateral > acct["cash"] + credits(acct):
+                continue  # the premiums collected count as spendable, as at a broker; cash may dip below zero by at most that much
             acct["positions"].append({"id": _new_id(), "type": "option", "symbol": s["symbol"], "optionType": "put", "side": "short",
                                       "qty": s["qty"], "strike": s["strike"], "expiration": s["expiration"], "premium": s["price"], "openedAt": today.isoformat()})
             acct["cash"] -= collateral
