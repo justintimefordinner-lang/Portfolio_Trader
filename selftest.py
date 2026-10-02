@@ -66,6 +66,8 @@ def main() -> int:
     ] + [  # six more that qualify: the backtest took every name with room, so must we
         {"sym": f"X{i}", "price": 50, "pick": pick(45, 35, far, 2.0, 4.4, 0.30, 4_500), "best": None, "reason": "ok", "erDate": None, "erDays": None, "erInWindow": False}
         for i in range(6)
+    ] + [  # the page's custom settings moved this pick; the trader must take the study's
+        {"sym": "STU", "price": 50, "pick": pick(48, 35, far, 2.5, 5.2, 0.45, 4_800), "study": pick(44, 35, far, 1.8, 4.1, 0.28, 4_400), "best": None, "reason": "ok", "erDate": None, "erDays": None, "erInWindow": False}
     ]}
     json.dump(scan, open(os.path.join(data, "quant-scan.json"), "w"))
     json.dump({"board": [], "screened": [{"sym": "FTNT", "score": 90, "tier": "S"}, {"sym": "KLAC", "score": 70, "tier": "A"}]}, open(os.path.join(data, "am_report.json"), "w"))
@@ -89,7 +91,12 @@ def main() -> int:
     check("MU skipped: earnings inside the put", ("csp", "MU") not in kinds)
     check("BIG skipped: one contract is over the per-name cap", ("csp", "BIG") not in kinds)
     csps = [s for s in sug if s["kind"] == "csp"]
-    check("every qualifying name is suggested — no cap on the count", len(csps) == 8, str([s["symbol"] for s in csps]))
+    check("every qualifying name is suggested — no cap on the count", len(csps) == 9, str([s["symbol"] for s in csps]))
+    stu = next((s for s in csps if s["symbol"] == "STU"), None)
+    check("the trader takes the study's pick, not the page's custom one", stu is not None and stu["strike"] == 44, str(stu and (stu["strike"], stu["qty"])))
+    hood_close = next(s for s in sug if s["kind"] == "close" and s["symbol"] == "HOOD")
+    rep = hood_close.get("replacement")
+    check("a close is paired with the best-ranked replacement, sized to the freed collateral", rep is not None and rep["symbol"] == "FTNT" and rep["qty"] == 1 and "Replace with: sell 1 × FTNT $170 put" in hood_close["detail"], str(rep))
     check("FTNT (Brief 90) ranks above KLAC (70) despite lower yield", [s["symbol"] for s in csps][:2] == ["FTNT", "KLAC"], str([s["symbol"] for s in csps]))
     tight = suggest.build(suggest.load_context(data), None, today=date.today(), cap={**cap, "freeCash": 20_000})
     check("room for one put: only the best-ranked name is suggested", [s["symbol"] for s in tight if s["kind"] == "csp"] == ["FTNT"], str([(s["symbol"], s["qty"]) for s in tight if s["kind"] == "csp"]))
@@ -106,7 +113,7 @@ def main() -> int:
     sent_bodies: list[dict] = []
     notify.push = lambda s, cfg=None, timeout=15.0: (sent_bodies.append(s) or True)  # type: ignore[assignment]
     sug2 = suggest.build(suggest.load_context(data), "ACC2", today=date.today())
-    check("second account: its own close, and one-lot puts under its smaller cap", len([s for s in sug2 if s["kind"] == "csp"]) == 6 and ("close", "HOOD") in {(s["kind"], s["symbol"]) for s in sug2}, str([(s["kind"], s["symbol"], s.get("qty")) for s in sug2]))
+    check("second account: its own close, and one-lot puts under its smaller cap", len([s for s in sug2 if s["kind"] == "csp"]) == 7 and ("close", "HOOD") in {(s["kind"], s["symbol"]) for s in sug2}, str([(s["kind"], s["symbol"], s.get("qty")) for s in sug2]))
     total = len(sug) + len(sug2)
     json.dump({"csp|KLAC|185|" + far: {"at": time.time(), "price": 8.85}}, open(trader.SENT_FILE, "w"))  # a receipt from before accounts were named
     r1 = trader.run_once(force=True, now=time.time(), entries=True)
@@ -167,12 +174,12 @@ def main() -> int:
     pacct = next(a for a in mdoc["accounts"] if a["id"] == paper.PAPER_ID)
     puts = [p for p in pacct["positions"] if p["type"] == "option" and p["optionType"] == "put"]
     # (the passes above already ran the paper book, so FTNT was sold before it left the scan)
-    check("Auto Trader created with $400k and every qualifying put sold", pacct["label"] == "Auto Trader" and len(puts) == 8, f"{len(puts)} puts: {[p['symbol'] for p in puts]}")
+    check("Auto Trader created with $400k and every qualifying put sold", pacct["label"] == "Auto Trader" and len(puts) == 9, f"{len(puts)} puts: {[p['symbol'] for p in puts]}")
     coll = sum(p["strike"] * 100 * p["qty"] for p in puts)
     check("cash dropped by the collateral (manual model: a put is collateral + P/L)", abs(pacct["cash"] - (400_000 - coll)) < 1, f"{pacct['cash']:.0f} vs {400_000 - coll:.0f}")
     paper.run(suggest.load_context(data), data, entries=True, today=pday, vix=16.3)
     pacct = next(a for a in json.load(open(os.path.join(data, "manual_positions.json")))["accounts"] if a["id"] == paper.PAPER_ID)
-    check("a second entries pass the same day adds nothing (bridge view lagging)", len(pacct["positions"]) == 8, str(len(pacct["positions"])))
+    check("a second entries pass the same day adds nothing (bridge view lagging)", len(pacct["positions"]) == 9, str(len(pacct["positions"])))
     # Expiry and a 50% close, driven by the bridge's priced view of the account.
     klac = next(p for p in pacct["positions"] if p["symbol"] == "KLAC")
     pacct["positions"] += [
@@ -199,7 +206,7 @@ def main() -> int:
     closed = json.load(open(os.path.join(data, "manual", "csp-closed.json")))["closed"]
     check("three CSP round-trips booked to the paper account", len(closed) == 3 and all(r["accountId"] == paper.PAPER_ID for r in closed) and {r["outcome"] for r in closed} == {"assigned", "expired", "closed_profit"}, str([(r["symbol"], r["outcome"], r["realizedPnl"]) for r in closed]))
     plog = json.load(open(os.path.join(data, "trader-paper.json")))
-    check("trade log written with a summary", plog["meta"]["label"] == "Auto Trader" and len(plog["trades"]) == 8 + 3 and pm["shareLots"] == 1 and pm["puts"] == 7, str(plog["meta"]))
+    check("trade log written with a summary", plog["meta"]["label"] == "Auto Trader" and len(plog["trades"]) == 9 + 3 and pm["shareLots"] == 1 and pm["puts"] == 8, str(plog["meta"]))
 
     print("clock (Eastern, no tz database needed)")
     utc = timezone.utc

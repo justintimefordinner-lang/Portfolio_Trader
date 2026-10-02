@@ -174,6 +174,14 @@ def committed_total(acct: dict) -> float:
     return sum(committed(s, acct) for s in syms)
 
 
+def study_pick(row: dict) -> dict | None:
+    """The put the BACKTEST's rule picks for a scan row. The dashboard's Quant
+    settings can move the scan's `pick`; the trader stays on the study's rule
+    (the user's call), which the bridge writes alongside as `study`."""
+    p = row.get("study", row.get("pick"))
+    return p if isinstance(p, dict) else None
+
+
 def fit(pick: dict, sym: str, acct: dict, cap: dict, taken: float = 0.0) -> dict:
     """How many contracts the rules allow, plus the flags the dashboard shows.
     `taken` is collateral already handed to earlier picks in the same pass."""
@@ -195,6 +203,25 @@ def _money(n: float) -> str:
     return f"${round(n):,}"
 
 
+def _replacement(o: dict, picks: list, acct: dict, cap: dict) -> dict | None:
+    """What to sell with the collateral a closing put frees: the same name's pick
+    when it still pays, otherwise the best-ranked name with room. Sized to the
+    freed collateral (a replacement, not an add)."""
+    freed = o["strike"] * MULT * o["qty"]
+    cap2 = {**cap, "freeCash": cap["freeCash"] + freed}
+    acct2 = {**acct, "options": [x for x in acct["options"] if x is not o]}  # the closing put no longer counts
+    ordered = [t for t in picks if t[2]["sym"] == o["symbol"]] + [t for t in picks if t[2]["sym"] != o["symbol"]]
+    for _, _, row, p, score in ordered:
+        f = fit(p, row["sym"], acct2, cap2)
+        if f["contracts"] < 1 or f["full"]:
+            continue
+        n = max(1, min(f["contracts"], int(freed // p["collateral"])))
+        return {"symbol": row["sym"], "strike": p["strike"], "expiration": p["exp"], "dte": p["dte"], "qty": n,
+                "price": p["mark"], "yield30": p["yield30"], "delta": p["delta"], "collateral": p["collateral"] * n,
+                "score": score}
+    return None
+
+
 def build(ctx: dict, account_id: str | None = None, today: date | None = None, entries: bool = True, cap: dict | None = None) -> list[dict]:
     """All suggestions, or with entries=False just the closes (what runs outside the entry window).
     `cap` overrides the capacity worked out from the snapshot (the paper account keeps its own)."""
@@ -210,21 +237,46 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
     today = today or date.today()
     out: list[dict] = []
 
-    # 1. Close at 50%.
+    # The scan's candidates under the STUDY's rule, best-ranked first (Brief score,
+    # then yield); a report inside the put's life sets a name aside.
+    scan = ctx.get("scan") or {}
+    report = ctx.get("report") or {}
+    scored = {r["sym"]: r for r in (report.get("screened") or report.get("board") or [])}
+    picks = []
+    for row in scan.get("rows") or []:
+        p = study_pick(row)
+        if not p:
+            continue
+        er_days = row.get("erDays")
+        if er_days is not None and 0 <= er_days <= p["dte"]:
+            continue
+        if _dte(p["exp"], today) < 20:
+            continue  # a stale scan: the contract is no longer in the window
+        score = (scored.get(row["sym"]) or {}).get("score")
+        picks.append((-(score if score is not None else -1), -p["yield30"], row, p, score))
+    picks.sort(key=lambda t: (t[0], t[1]))
+
+    # 1. Close at 50% — paired with the replacement the rule would sell with the
+    #    freed collateral: the same name if it still pays, else the best-ranked one.
     for o in acct["options"]:
         if o.get("kind") != "csp" or o["side"] != "short" or not o.get("entryPerShare"):
             continue
         captured = (o["entryPerShare"] - o["mark"]) / o["entryPerShare"]
         dte = _dte(o["expiration"], today)
         if captured >= R["closeAt"] and dte > 0:
+            rep = _replacement(o, picks, acct, cap)
             out.append({
                 "key": f"close|{o['symbol']}|{o['strike']}|{o['expiration']}",
                 "kind": "close", "symbol": o["symbol"], "strike": o["strike"], "expiration": o["expiration"],
                 "qty": o["qty"], "price": round(o["mark"], 2),
                 "title": f"Close {o['qty']} × {o['symbol']} ${o['strike']:g} put ({o['expiration'][5:]})",
-                "detail": f"{round(captured * 100)}% of the {o['entryPerShare']:.2f} credit captured; buy back near {o['mark']:.2f} with {dte} days left. The study closes here every time.",
+                "detail": (f"{round(captured * 100)}% of the {o['entryPerShare']:.2f} credit captured; buy back near {o['mark']:.2f} with {dte} days left. The study closes here every time."
+                           + (f" Replace with: sell {rep['qty']} × {rep['symbol']} ${rep['strike']:g} put ({rep['expiration'][5:]}, {rep['dte']}d) at {rep['price']:.2f}, "
+                              f"{rep['yield30']:.1f}% per 30 days, {rep['delta']:.2f}Δ{' — same name still pays' if rep['symbol'] == o['symbol'] else ''}." if rep
+                              else " Nothing in the scan pays the target for the freed collateral right now.")),
                 "amount": round(o["mark"] * MULT * o["qty"], 2),
                 "rule": "close at 50%",
+                "replacement": rep,
             })
 
     if not entries:
@@ -233,19 +285,6 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
         return out
 
     # 2. New CSPs from the scan: every name that qualifies, in Brief-score then yield order.
-    scan = ctx.get("scan") or {}
-    report = ctx.get("report") or {}
-    scored = {r["sym"]: r for r in (report.get("screened") or report.get("board") or [])}
-    picks = []
-    for row in scan.get("rows") or []:
-        p = row.get("pick")
-        if not p or row.get("erInWindow"):
-            continue
-        if _dte(p["exp"], today) < 20:
-            continue  # a stale scan: the contract is no longer in the window
-        score = (scored.get(row["sym"]) or {}).get("score")
-        picks.append((-(score if score is not None else -1), -p["yield30"], row, p, score))
-    picks.sort(key=lambda t: (t[0], t[1]))
     # Capital is handed out in that order, each pick seeing what the ones before it
     # took, so a day with room for one put suggests one — the best ranked — not four.
     spent = 0.0
