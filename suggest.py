@@ -182,16 +182,17 @@ def study_pick(row: dict) -> dict | None:
     return p if isinstance(p, dict) else None
 
 
-def fit(pick: dict, sym: str, acct: dict, cap: dict, taken: float = 0.0) -> dict:
+def fit(pick: dict, sym: str, acct: dict, cap: dict, taken: float = 0.0, taken_sym: float = 0.0, stretch: bool = True) -> dict:
     """How many contracts the rules allow, plus the flags the dashboard shows.
-    `taken` is collateral already handed to earlier picks in the same pass."""
-    c = committed(sym, acct)
+    `taken` is collateral already handed out in this pass; `taken_sym` the part of
+    it that went to this name. `stretch` allows the one-contract overshoot."""
+    c = committed(sym, acct) + taken_sym
     per_cap = R["maxPerTicker"] * cap["buyingPower"]
     room_ticker = per_cap - c
     room_total = cap["buyingPower"] - committed_total(acct) - taken
     room = min(room_ticker, room_total, cap["freeCash"])
     contracts = int(room // pick["collateral"]) if room > 0 else 0
-    if contracts < 1 and room_ticker > 0:
+    if contracts < 1 and room_ticker > 0 and stretch:
         cap_hi = (R["maxPerTicker"] + R["tickerBand"]) * cap["buyingPower"] - c
         if cap_hi >= pick["collateral"] and min(room_total, cap["freeCash"]) >= pick["collateral"]:
             contracts = 1
@@ -285,15 +286,28 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
         return out
 
     # 2. New CSPs from the scan: every name that qualifies, in Brief-score then yield order.
-    # Capital is handed out in that order, each pick seeing what the ones before it
-    # took, so a day with room for one put suggests one — the best ranked — not four.
+    # Capital goes round-robin — one contract per name per round, best ranked first,
+    # until the cash or every name's room is used — so a day with room for four
+    # puts spreads them over four names rather than handing all four to the first.
+    # (The user's call: the Brief's score orders the queue, it doesn't concentrate.)
+    alloc: dict[str, int] = {}
     spent = 0.0
+    progress = True
+    while progress:
+        progress = False
+        for _, _, row, p, score in picks:
+            sym = row["sym"]
+            f = fit(p, sym, acct, {**cap, "freeCash": cap["freeCash"] - spent}, spent, alloc.get(sym, 0) * p["collateral"], stretch=sym not in alloc)
+            if f["contracts"] < 1 or f["full"]:
+                continue
+            alloc[sym] = alloc.get(sym, 0) + 1
+            spent += p["collateral"]
+            progress = True
     for _, _, row, p, score in picks:
-        f = fit(p, row["sym"], acct, {**cap, "freeCash": cap["freeCash"] - spent}, spent)
-        if f["contracts"] < 1 or f["full"]:
+        n = alloc.get(row["sym"], 0)
+        if n < 1:
             continue
-        n = f["contracts"]
-        spent += p["collateral"] * n
+        f = fit(p, row["sym"], acct, cap)  # for the flags (held / adds)
         out.append({
             "key": f"csp|{row['sym']}|{p['strike']}|{p['exp']}",
             "kind": "csp", "symbol": row["sym"], "strike": p["strike"], "expiration": p["exp"],

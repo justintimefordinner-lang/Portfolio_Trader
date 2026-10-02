@@ -100,6 +100,8 @@ def main() -> int:
     check("FTNT (Brief 90) ranks above KLAC (70) despite lower yield", [s["symbol"] for s in csps][:2] == ["FTNT", "KLAC"], str([s["symbol"] for s in csps]))
     tight = suggest.build(suggest.load_context(data), None, today=date.today(), cap={**cap, "freeCash": 20_000})
     check("room for one put: only the best-ranked name is suggested", [s["symbol"] for s in tight if s["kind"] == "csp"] == ["FTNT"], str([(s["symbol"], s["qty"]) for s in tight if s["kind"] == "csp"]))
+    rr = {s["symbol"]: s["qty"] for s in suggest.build(suggest.load_context(data), None, today=date.today(), cap={**cap, "freeCash": 30_000}) if s["kind"] == "csp"}
+    check("round-robin: $30k spreads one contract per name (FTNT, X0, X1), not two to X0", rr == {"FTNT": 1, "X0": 1, "X1": 1}, str(rr))
     closes_only = suggest.build(suggest.load_context(data), None, today=date.today(), entries=False)
     check("outside the window only closes are built", {s["kind"] for s in closes_only} == {"close"}, str({s["kind"] for s in closes_only}))
     klac = next(s for s in csps if s["symbol"] == "KLAC")
