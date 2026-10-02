@@ -23,13 +23,23 @@ def config() -> dict:
     }
 
 
+def header(value: str) -> str:
+    """HTTP headers are latin-1; ntfy reads RFC 2047 encoded words, so anything
+    beyond ASCII (an account mask's bullets, a ×, a Δ) goes as =?UTF-8?B?…?=."""
+    if value.isascii():
+        return value
+    import base64
+
+    return "=?UTF-8?B?" + base64.b64encode(value.encode("utf-8")).decode("ascii") + "?="
+
+
 def push(s: dict, cfg: dict | None = None, timeout: float = 15.0) -> bool:
     """Send one suggestion. Returns True on a 2xx. Never raises."""
     cfg = cfg or config()
     if not cfg["topic"]:
         return False
     headers = {
-        "Title": (f"{s['account']} · " if s.get("account") else "") + s["title"],
+        "Title": header((f"{s['account']} · " if s.get("account") else "") + s["title"]),
         "Priority": PRIORITY.get(s["kind"], "default"),
         "Tags": TAGS.get(s["kind"], "chart_with_upwards_trend"),
     }
@@ -45,7 +55,7 @@ def push(s: dict, cfg: dict | None = None, timeout: float = 15.0) -> bool:
     try:
         r = requests.post(f"{cfg['url']}/{cfg['topic']}", data=body.encode("utf-8"), headers=headers, timeout=timeout)
         return 200 <= r.status_code < 300
-    except requests.RequestException:
+    except Exception:  # noqa: BLE001 — a push that cannot be sent is a push not sent, never a dead pass
         return False
 
 

@@ -221,6 +221,11 @@ def main() -> int:
     puts_left = [p for p in pacct["positions"] if p["type"] == "option" and p["optionType"] == "put"]
     check("undo: the window's put sales are unwound, collateral returned, settlements kept", not puts_left and pacct["cash"] > cash_before_undo and any(l.startswith("kept") for l in lines) and sum(1 for l in lines if l.startswith("undid")) >= 8, f"{len(puts_left)} puts left; {lines[:3]}")
 
+    print("notifications")
+    check("ASCII header passes through", notify.header("Trading · Sell 2 x KLAC") == "Trading · Sell 2 x KLAC" or notify.header("Trading - Sell 2 x KLAC") == "Trading - Sell 2 x KLAC")
+    check("a masked account label (bullets) is RFC 2047 encoded, not sent raw", notify.header("margin ••••9362 · Sell 1 × AMKR $46 put").startswith("=?UTF-8?B?") and notify.header("margin ••••9362").isascii())
+    check("every header the push builds is ASCII", all(v.isascii() for v in {"Title": notify.header("margin ••••9362 · Close 2 × HOOD $90 put"), "Click": "http://pi:3000/trader"}.values()))
+
     print("clock (Eastern, no tz database needed)")
     utc = timezone.utc
     check("market_open false on a Sunday", not trader.market_open(datetime(2026, 10, 4, 15, 0, tzinfo=utc)))

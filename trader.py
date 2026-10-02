@@ -279,7 +279,12 @@ def run_once(force: bool = False, now: float | None = None, entries: bool | None
         if fb and fb.get("status"):
             row["status"] = fb["status"]  # the app's verdict wins
         if row["status"] in ("new",) and not paused and should_push(s, sent, now):
-            if notify.push(s, cfg):
+            try:
+                ok = notify.push(s, cfg)
+            except Exception as exc:  # noqa: BLE001 — one bad notification must not sink the pass
+                _log(f"push failed for {s.get('key')}: {exc}")
+                ok = False
+            if ok:
                 pushed += 1
                 sent[s["key"]] = {"at": now, "price": s.get("price")}
                 row["pushedAt"] = stamp
