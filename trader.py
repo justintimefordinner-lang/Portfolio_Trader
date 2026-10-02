@@ -239,7 +239,8 @@ def run_once(force: bool = False, now: float | None = None, entries: bool | None
     if paper.ENABLED:
         try:
             paper_meta = paper.run(ctx, DATA_DIR, entries=entries, today=to_et(when).date(),
-                                   vix=((ctx.get("vix") or {}).get("inputs") or {}).get("vix"))
+                                   vix=((ctx.get("vix") or {}).get("inputs") or {}).get("vix"),
+                                   market_open=market_open(when))  # a Run now at 3 a.m. suggests; it does not fill
         except Exception as exc:  # noqa: BLE001 — the paper book must never block the live suggestions
             _log(f"paper: ERROR - {exc}")
 

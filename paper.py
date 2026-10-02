@@ -312,13 +312,19 @@ def apply(data_dir: str, acct: dict, suggestions: list[dict], today: date, when:
     return out
 
 
-def run(ctx: dict, data_dir: str, entries: bool, today: date, vix: float | None) -> dict:
-    """One pass over the paper account. Returns the summary written to the log's meta."""
+def run(ctx: dict, data_dir: str, entries: bool, today: date, vix: float | None, market_open: bool = True) -> dict:
+    """One pass over the paper account. Returns the summary written to the log's meta.
+    Nothing is booked outside market hours — not even on Run now — since a fill at
+    3 a.m. is not a fill; the log's meta just notes the pass was skipped."""
     when = datetime.now(timezone.utc).isoformat(timespec="seconds")
     acct = ensure_account(data_dir)
-    snap_acct = snapshot_account(data_dir)
     log_path = os.path.join(data_dir, LOG_FILE)
     log = _read(log_path, None) or {"trades": []}
+    if not market_open:
+        meta = {**(log.get("meta") or {}), "skipped": f"market closed at {when}", "entries": False}
+        _write(log_path, {"meta": meta, "trades": list(log.get("trades") or [])[-KEEP:]})
+        return meta
+    snap_acct = snapshot_account(data_dir)
     trades: list[dict] = list(log.get("trades") or [])
 
     trades += settle_expired(data_dir, acct, snap_acct, today, when)
@@ -338,3 +344,69 @@ def run(ctx: dict, data_dir: str, entries: bool, today: date, vix: float | None)
             "priced": snap_acct is not None, "entries": entries, "trades": len(trades)}
     _write(log_path, {"meta": meta, "trades": trades[-KEEP:]})
     return meta
+
+
+# ---- undo ----------------------------------------------------------------------------
+def undo(data_dir: str, since: str, until: str | None = None) -> list[str]:
+    """Reverse the paper trades booked between two UTC timestamps (ISO, prefix match
+    is fine: "2026-10-02T08:5"). Sales and closes are unwound and dropped from the
+    log; settlements (assigned / called / expired) are left alone, since the
+    expiry really happened. Returns one line per trade for the terminal.
+
+        docker compose exec trader python /opt/trader/paper.py undo 2026-10-02T08:50 2026-10-02T09:00
+    """
+    acct = ensure_account(data_dir)
+    log_path = os.path.join(data_dir, LOG_FILE)
+    log = _read(log_path, None) or {"trades": []}
+    trades = list(log.get("trades") or [])
+    hit = [t for t in trades if since <= str(t.get("at", "")) and (until is None or str(t.get("at", "")) <= until)]
+    out: list[str] = []
+    keep_ids: set[int] = set()
+    for t in reversed(hit):  # newest first, so a close undone before the sale it followed
+        kind, sym = t.get("kind"), t.get("symbol")
+        text = t.get("text", "")
+        if kind in ("csp", "cc"):
+            ot = "put" if kind == "csp" else "call"
+            rows = [p for p in acct["positions"] if p.get("type") == "option" and p["side"] == "short" and p["optionType"] == ot and p["symbol"] == sym]
+            row = max(rows, key=lambda p: p.get("openedAt") or "") if rows else None
+            if not row:
+                out.append(f"skip  {text} (position no longer on the book)")
+                keep_ids.add(id(t))
+                continue
+            acct["positions"] = [p for p in acct["positions"] if p is not row]
+            if kind == "csp":
+                acct["cash"] += row["strike"] * MULT * row["qty"]
+            out.append(f"undid {text}")
+        elif kind == "close":
+            path = os.path.join(data_dir, MANUAL_DIR, "csp-closed.json")
+            doc = _read(path, None) or {"closed": []}
+            recs = [r for r in doc.get("closed", []) if r.get("symbol") == sym and r.get("accountId") == PAPER_ID and r.get("outcome") in ("closed_profit", "closed_loss")]
+            rec = max(recs, key=lambda r: r.get("closedAt") or "") if recs else None
+            if not rec:
+                out.append(f"skip  {text} (closed record not found)")
+                keep_ids.add(id(t))
+                continue
+            doc["closed"] = [r for r in doc["closed"] if r is not rec]
+            _write(path, doc)
+            acct["positions"].append({"id": rec["id"].split(":", 1)[1] if ":" in rec["id"] else _new_id(), "type": "option", "symbol": sym, "optionType": "put", "side": "short",
+                                      "qty": rec["contracts"], "strike": rec["strike"], "expiration": rec["expiration"], "premium": rec["creditPerShare"], "openedAt": rec.get("openedAt")})
+            acct["cash"] -= rec["collateral"] + rec["realizedPnl"]
+            out.append(f"undid {text}")
+        else:
+            out.append(f"kept  {text} (a settlement, not undone)")
+            keep_ids.add(id(t))
+    hit_ids = {id(t) for t in hit} - keep_ids
+    save_account(data_dir, acct)
+    _write(log_path, {"meta": {**(log.get("meta") or {}), "cash": _r2(acct["cash"]), "undoneAt": datetime.now(timezone.utc).isoformat(timespec="seconds")},
+                      "trades": [t for t in trades if id(t) not in hit_ids]})
+    return out or ["nothing in that window"]
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) >= 3 and sys.argv[1] == "undo":
+        for line in undo(os.environ.get("APP_DATA_DIR", "/app/data"), sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None):
+            print(line)
+    else:
+        print("usage: paper.py undo <since-iso-utc> [until-iso-utc]")

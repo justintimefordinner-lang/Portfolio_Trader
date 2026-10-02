@@ -114,14 +114,15 @@ def main() -> int:
     print("pushes + the file")
     sent_bodies: list[dict] = []
     notify.push = lambda s, cfg=None, timeout=15.0: (sent_bodies.append(s) or True)  # type: ignore[assignment]
+    mkt = datetime(2026, 10, 1, 18, 0, tzinfo=timezone.utc)  # a Thursday, 14:00 ET: the paper book only trades in market hours
     sug2 = suggest.build(suggest.load_context(data), "ACC2", today=date.today())
     check("second account: its own close, and one-lot puts under its smaller cap", len([s for s in sug2 if s["kind"] == "csp"]) == 7 and ("close", "HOOD") in {(s["kind"], s["symbol"]) for s in sug2}, str([(s["kind"], s["symbol"], s.get("qty")) for s in sug2]))
     total = len(sug) + len(sug2)
     json.dump({"csp|KLAC|185|" + far: {"at": time.time(), "price": 8.85}}, open(trader.SENT_FILE, "w"))  # a receipt from before accounts were named
-    r1 = trader.run_once(force=True, now=time.time(), entries=True)
+    r1 = trader.run_once(force=True, now=time.time(), entries=True, when=mkt)
     check("first pass pushes every new suggestion for every account (one old receipt migrated)", r1["pushed"] == total - 1 and r1["accounts"] == 2, f"{r1} vs {total}")
     check("every push names its account; keys carry the account", all(b.get("account") in ("Trading", "Roth") for b in sent_bodies) and all(b["key"].startswith(("ACC1|", "ACC2|")) for b in sent_bodies), str([(b.get("account"), b["key"]) for b in sent_bodies][:3]))
-    r2 = trader.run_once(force=True, now=time.time() + 60, entries=True)
+    r2 = trader.run_once(force=True, now=time.time() + 60, entries=True, when=mkt)
     check("second pass a minute later pushes nothing", r2["pushed"] == 0, str(r2))
     # 10:00 ET, before the window: closes only, and the morning's puts are NOT expired by their absence
     before = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
@@ -142,7 +143,7 @@ def main() -> int:
     check("later in the same slot: closes only (a slot is served once)", r2e["entries"] is False and not r2e.get("waiting"), str(r2e))
     r2f = trader.run_once(force=True, now=time.time() + 360, when=datetime(2026, 10, 1, 16, 5, tzinfo=timezone.utc))
     check("the 12:00 slot wants a scan of its own: waiting again", r2f.get("waiting") == "scan", str(r2f))
-    r3 = trader.run_once(force=True, now=time.time() + 25 * 3600, entries=True)
+    r3 = trader.run_once(force=True, now=time.time() + 25 * 3600, entries=True, when=mkt)
     check("a day later, still-standing suggestions are re-sent for every account", r3["pushed"] == total, f"{r3} vs {total}")
     open(os.path.join(data, "trader-run"), "w").close()
     sent_bodies.clear()
@@ -152,19 +153,19 @@ def main() -> int:
     # the app marks one as done; the trader respects it and stops pushing it
     json.dump({klac["key"]: {"status": "done", "at": datetime.now().isoformat()}}, open(os.path.join(data, "trade-feedback.json"), "w"))
     sent_bodies.clear()
-    trader.run_once(force=True, now=time.time() + 50 * 3600, entries=True)
+    trader.run_once(force=True, now=time.time() + 50 * 3600, entries=True, when=mkt)
     doc = json.load(open(os.path.join(data, "trade-suggestions.json")))
     kkey = "ACC1|" + klac["key"]  # the verdict was written with the old key; it is migrated too
     check("app's verdict wins and silences the push", next(s for s in doc["suggestions"] if s["key"] == kkey)["status"] == "done" and not any(b["key"] == kkey for b in sent_bodies))
     # a suggestion that stops applying is marked expired, not deleted
     scan["rows"] = [r for r in scan["rows"] if r["sym"] != "FTNT"]
     json.dump(scan, open(os.path.join(data, "quant-scan.json"), "w"))
-    trader.run_once(force=True, now=time.time() + 50 * 3600, entries=True)
+    trader.run_once(force=True, now=time.time() + 50 * 3600, entries=True, when=mkt)
     doc = json.load(open(os.path.join(data, "trade-suggestions.json")))
     check("gone from the scan -> expired, kept in the log", next(s for s in doc["suggestions"] if s["symbol"] == "FTNT" and s["kind"] == "csp")["status"] == "expired")
     open(os.path.join(work, "paused"), "w").close()
     sent_bodies.clear()
-    trader.run_once(force=True, now=time.time() + 80 * 3600, entries=True)
+    trader.run_once(force=True, now=time.time() + 80 * 3600, entries=True, when=mkt)
     check("paused: nothing pushed", not sent_bodies)
 
     print("paper account")
@@ -209,6 +210,16 @@ def main() -> int:
     check("three CSP round-trips booked to the paper account", len(closed) == 3 and all(r["accountId"] == paper.PAPER_ID for r in closed) and {r["outcome"] for r in closed} == {"assigned", "expired", "closed_profit"}, str([(r["symbol"], r["outcome"], r["realizedPnl"]) for r in closed]))
     plog = json.load(open(os.path.join(data, "trader-paper.json")))
     check("trade log written with a summary", plog["meta"]["label"] == "Auto Trader" and len(plog["trades"]) == 9 + 3 and pm["shareLots"] == 1 and pm["puts"] == 8, str(plog["meta"]))
+    before = json.load(open(os.path.join(data, "manual_positions.json")))
+    pm2 = paper.run(suggest.load_context(data), data, entries=True, today=pday, vix=16.3, market_open=False)
+    check("market closed: the paper book is untouched, pass noted as skipped", pm2.get("skipped") and json.load(open(os.path.join(data, "manual_positions.json"))) == before, str(pm2.get("skipped")))
+    # Undo everything booked in the last minute: the sales come off and the cash comes back; settlements stay.
+    cash_before_undo = pacct["cash"]
+    since = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(timespec="seconds")
+    lines = paper.undo(data, since)
+    pacct = next(a for a in json.load(open(os.path.join(data, "manual_positions.json")))["accounts"] if a["id"] == paper.PAPER_ID)
+    puts_left = [p for p in pacct["positions"] if p["type"] == "option" and p["optionType"] == "put"]
+    check("undo: the window's put sales are unwound, collateral returned, settlements kept", not puts_left and pacct["cash"] > cash_before_undo and any(l.startswith("kept") for l in lines) and sum(1 for l in lines if l.startswith("undid")) >= 8, f"{len(puts_left)} puts left; {lines[:3]}")
 
     print("clock (Eastern, no tz database needed)")
     utc = timezone.utc
