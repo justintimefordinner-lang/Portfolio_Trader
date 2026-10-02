@@ -265,14 +265,17 @@ def _find_put(acct: dict, s: dict) -> dict | None:
     return None
 
 
-def apply(data_dir: str, acct: dict, suggestions: list[dict], today: date, when: str) -> list[dict]:
-    """Book each suggestion as a trade in the paper account."""
+def apply(data_dir: str, acct: dict, suggestions: list[dict], today: date, when: str, traded_today: set[str] | None = None) -> list[dict]:
+    """Book each suggestion as a trade in the paper account. With hourly entry
+    slots, a name gets at most one new put a day (the backtest added daily)."""
     out: list[dict] = []
+    traded_today = traded_today if traded_today is not None else set()
     for s in suggestions:
         k = s["kind"]
         if k == "csp":
-            if _find_put(acct, s):
-                continue  # already on (the bridge's view lagged a pass)
+            if _find_put(acct, s) or s["symbol"] in traded_today:
+                continue  # already on (the bridge's view lagged a pass), or sold one earlier today
+            traded_today.add(s["symbol"])
             collateral = s["strike"] * MULT * s["qty"]
             if collateral > acct["cash"]:
                 continue
@@ -314,7 +317,8 @@ def run(ctx: dict, data_dir: str, entries: bool, today: date, vix: float | None)
     ctx_paper = {**ctx, "snapshot": {"data": {PAPER_ID: view}}}
     cap = capacity(acct, snap_acct, vix)
     sug = suggest.build(ctx_paper, PAPER_ID, today=today, entries=entries, cap=cap)
-    trades += apply(data_dir, acct, [s for s in sug if s["kind"] in ("csp", "close", "cc")], today, when)
+    traded_today = {t.get("symbol") for t in trades if t.get("kind") == "csp" and str(t.get("at", ""))[:10] == today.isoformat()}
+    trades += apply(data_dir, acct, [s for s in sug if s["kind"] in ("csp", "close", "cc")], today, when, traded_today)
     save_account(data_dir, acct)
 
     opts = [p for p in acct["positions"] if p.get("type") == "option"]

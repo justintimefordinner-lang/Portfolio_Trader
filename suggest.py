@@ -38,10 +38,42 @@ def _read(path: str, default=None):
         return default
 
 
+def load_snapshots(data_dir: str) -> dict | None:
+    """Every account the dashboard shows: the base snapshot plus each bridge's
+    subfolder (data/acct2/, data/manual/ …), merged the way the app merges them."""
+    merged: dict = {"meta": {}, "accounts": [], "data": {}}
+    found = False
+    dirs = [data_dir]
+    try:
+        dirs += sorted(os.path.join(data_dir, d) for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d)))
+    except OSError:
+        pass
+    seen: set[str] = set()
+    for d in dirs:
+        snap = _read(os.path.join(d, "snapshot.json"))
+        if not snap or not isinstance(snap.get("data"), dict):
+            continue
+        found = True
+        if not merged["meta"]:
+            merged["meta"] = snap.get("meta") or {}
+        for a in snap.get("accounts") or []:
+            if a.get("id") in seen:
+                continue
+            seen.add(a["id"])
+            merged["accounts"].append(a)
+        merged["data"].update(snap["data"])
+    return merged if found else None
+
+
+def account_label(acct: dict) -> str:
+    """What the dashboard calls the account: its nickname, else type and masked number."""
+    return str(acct.get("nickname") or f"{acct.get('type') or 'Account'} {acct.get('mask') or ''}".strip())
+
+
 def load_context(data_dir: str) -> dict:
     """Everything the rules need, read fresh. Missing files are None."""
     return {
-        "snapshot": _read(os.path.join(data_dir, "snapshot.json")),
+        "snapshot": load_snapshots(data_dir),
         "scan": _read(os.path.join(data_dir, "quant-scan.json")),
         "report": _read(os.path.join(data_dir, "am_report.json")),
         "vix": _read(os.path.join(data_dir, "vix.json")),
@@ -104,12 +136,23 @@ def vix_margin(vix: float | None) -> float:
     return min(0.35, 0.05 * int(vix // 5))
 
 
-def capacity(acct: dict, vix: float | None) -> dict:
+def capacity(acct: dict, vix: float | None, manual: bool = False) -> dict:
+    """Free cash and buying power. A broker account's total is liquidation value, so
+    cash is backed out of it; a manual account (hand-entered or imported) carries
+    its own `cash`, already net of what secures its puts."""
     s, eq, opts = acct["summary"], acct["equities"], acct["options"]
+    margin = vix_margin(vix)
+    if manual:
+        free = max(0.0, float(s.get("cash") or 0))
+        return {
+            "totalValue": s["totalValue"], "margin": margin,
+            "buyingPower": s["totalValue"] * (1 + margin),
+            "freeCash": free + margin * s["totalValue"],
+            "putObligations": csp_collateral(opts) + spread_cash_requirement(opts),
+        }
     options_net = sum((1 if o["side"] == "long" else -1) * o["mark"] * MULT * o["qty"] for o in opts)
     cash = s["totalValue"] - s["equityValue"] - s.get("cryptoValue", 0) - options_net
     money_market = sum(e["qty"] * e["price"] for e in eq if e["symbol"] in CASH_EQUIVALENTS)
-    margin = vix_margin(vix)
     free = max(0.0, cash + money_market - csp_collateral(opts) - spread_cash_requirement(opts))
     return {
         "totalValue": s["totalValue"], "margin": margin,
@@ -163,7 +206,7 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
     if not acct:
         return []
     vix = ((ctx.get("vix") or {}).get("inputs") or {}).get("vix")
-    cap = cap or capacity(acct, vix)
+    cap = cap or capacity(acct, vix, manual=acct_id.startswith("manual-"))
     today = today or date.today()
     out: list[dict] = []
 

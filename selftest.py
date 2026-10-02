@@ -51,6 +51,11 @@ def main() -> int:
             {"id": "d", "kind": "put-spread", "symbol": "SMH", "optionType": "put", "side": "long", "qty": 6, "strike": 610, "expiration": far, "entryPerShare": 39.05, "mark": 39.67, "delta": -0.4, "theta": 0, "iv": 0.3, "breakeven": 0},
         ],
         "valueHistory": []}}}
+    # Two accounts, named the way the dashboard names them; the second is small.
+    snap["accounts"] = [{"id": "ACC1", "nickname": "Trading", "mask": "1234", "type": "MARGIN", "isDefault": True},
+                        {"id": "ACC2", "nickname": "Roth", "mask": "5678", "type": "IRA"}]
+    snap["data"]["ACC2"] = {"summary": {"totalValue": 50_000, "equityValue": 0, "cryptoValue": 0, "cash": 50_000}, "equities": [], "valueHistory": [],
+                            "options": [{"id": "r", "kind": "csp", "symbol": "HOOD", "optionType": "put", "side": "short", "qty": 1, "strike": 80, "expiration": far, "entryPerShare": 1.5, "mark": 0.4, "delta": -0.1, "theta": 0, "iv": 0.5, "breakeven": 78.5}]}
     json.dump(snap, open(os.path.join(data, "snapshot.json"), "w"))
     pick = lambda strike, dte, exp, mark, y, delta, coll: {"exp": exp, "dte": dte, "strike": strike, "bid": mark - 0.05, "ask": mark + 0.05, "mark": mark, "delta": delta, "yield30": y, "annPct": y * 12, "premium": mark * 100, "collateral": coll, "oi": 1000, "volume": 100, "spreadPct": 2.0, "iv": 0.5, "belowSpotPct": 8.0}
     scan = {"meta": {"asOf": "x", "qualifying": 3, "universe": 5, "params": {}}, "rows": [
@@ -100,8 +105,13 @@ def main() -> int:
     print("pushes + the file")
     sent_bodies: list[dict] = []
     notify.push = lambda s, cfg=None, timeout=15.0: (sent_bodies.append(s) or True)  # type: ignore[assignment]
+    sug2 = suggest.build(suggest.load_context(data), "ACC2", today=date.today())
+    check("second account: its own close, and one-lot puts under its smaller cap", len([s for s in sug2 if s["kind"] == "csp"]) == 6 and ("close", "HOOD") in {(s["kind"], s["symbol"]) for s in sug2}, str([(s["kind"], s["symbol"], s.get("qty")) for s in sug2]))
+    total = len(sug) + len(sug2)
+    json.dump({"csp|KLAC|185|" + far: {"at": time.time(), "price": 8.85}}, open(trader.SENT_FILE, "w"))  # a receipt from before accounts were named
     r1 = trader.run_once(force=True, now=time.time(), entries=True)
-    check("first pass pushes every new suggestion", r1["pushed"] == len(sug) and len(sent_bodies) == len(sug), str(r1))
+    check("first pass pushes every new suggestion for every account (one old receipt migrated)", r1["pushed"] == total - 1 and r1["accounts"] == 2, f"{r1} vs {total}")
+    check("every push names its account; keys carry the account", all(b.get("account") in ("Trading", "Roth") for b in sent_bodies) and all(b["key"].startswith(("ACC1|", "ACC2|")) for b in sent_bodies), str([(b.get("account"), b["key"]) for b in sent_bodies][:3]))
     r2 = trader.run_once(force=True, now=time.time() + 60, entries=True)
     check("second pass a minute later pushes nothing", r2["pushed"] == 0, str(r2))
     # 10:00 ET, before the window: closes only, and the morning's puts are NOT expired by their absence
@@ -109,18 +119,22 @@ def main() -> int:
     r2b = trader.run_once(force=True, now=time.time() + 120, when=before)
     doc = json.load(open(os.path.join(data, "trade-suggestions.json")))
     check("before the window: closes only, puts from the window still stand", r2b["entries"] is False and all(s["status"] == "new" for s in doc["suggestions"] if s["kind"] == "csp"), str(r2b))
-    # 11:30 ET with a scan that is not fresh: wait, and ask the bridge for one
+    # 11:30 ET, the 11:00 slot, with a scan that is not fresh: wait, and ask the bridge for one
     trader.INBOX_DIR = os.path.join(work, "inbox")
     os.makedirs(trader.INBOX_DIR)
     inwin = datetime(2026, 10, 1, 15, 30, tzinfo=timezone.utc)
     r2c = trader.run_once(force=True, now=time.time() + 180, when=inwin)
-    check("in the window with a stale scan: waiting, scan requested", r2c.get("waiting") == "scan" and os.path.exists(os.path.join(trader.INBOX_DIR, "quant_scan")), str(r2c))
+    check("in a slot with a stale scan: waiting, scan requested", r2c.get("waiting") == "scan" and os.path.exists(os.path.join(trader.INBOX_DIR, "quant_scan")), str(r2c))
     scan["meta"]["asOf"] = "2026-10-01T15:05:00+00:00"
     json.dump(scan, open(os.path.join(data, "quant-scan.json"), "w"))
     r2d = trader.run_once(force=True, now=time.time() + 240, when=inwin)
-    check("in the window with a fresh scan: entries built", r2d["entries"] is True, str(r2d))
+    check("in a slot with a fresh scan: entries built", r2d["entries"] is True, str(r2d))
+    r2e = trader.run_once(force=True, now=time.time() + 300, when=datetime(2026, 10, 1, 15, 40, tzinfo=timezone.utc))
+    check("later in the same slot: closes only (a slot is served once)", r2e["entries"] is False and not r2e.get("waiting"), str(r2e))
+    r2f = trader.run_once(force=True, now=time.time() + 360, when=datetime(2026, 10, 1, 16, 5, tzinfo=timezone.utc))
+    check("the 12:00 slot wants a scan of its own: waiting again", r2f.get("waiting") == "scan", str(r2f))
     r3 = trader.run_once(force=True, now=time.time() + 25 * 3600, entries=True)
-    check("a day later, still-standing suggestions are re-sent", r3["pushed"] == len(sug), str(r3))
+    check("a day later, still-standing suggestions are re-sent for every account", r3["pushed"] == total, f"{r3} vs {total}")
     open(os.path.join(data, "trader-run"), "w").close()
     sent_bodies.clear()
     check("Run now: marker consumed, full pass", trader.run_requested() and not os.path.exists(os.path.join(data, "trader-run")) and json.load(open(os.path.join(data, "trade-suggestions.json")))["meta"]["lastPass"] == "run now")
@@ -131,7 +145,8 @@ def main() -> int:
     sent_bodies.clear()
     trader.run_once(force=True, now=time.time() + 50 * 3600, entries=True)
     doc = json.load(open(os.path.join(data, "trade-suggestions.json")))
-    check("app's verdict wins and silences the push", next(s for s in doc["suggestions"] if s["key"] == klac["key"])["status"] == "done" and not any(b["key"] == klac["key"] for b in sent_bodies))
+    kkey = "ACC1|" + klac["key"]  # the verdict was written with the old key; it is migrated too
+    check("app's verdict wins and silences the push", next(s for s in doc["suggestions"] if s["key"] == kkey)["status"] == "done" and not any(b["key"] == kkey for b in sent_bodies))
     # a suggestion that stops applying is marked expired, not deleted
     scan["rows"] = [r for r in scan["rows"] if r["sym"] != "FTNT"]
     json.dump(scan, open(os.path.join(data, "quant-scan.json"), "w"))
@@ -190,16 +205,19 @@ def main() -> int:
     utc = timezone.utc
     check("market_open false on a Sunday", not trader.market_open(datetime(2026, 10, 4, 15, 0, tzinfo=utc)))
     check("market_open true on a Thursday at 2pm ET", trader.market_open(datetime(2026, 10, 1, 18, 0, tzinfo=utc)))
-    check("window: 11:30 EDT in", trader.in_entry_window(datetime(2026, 10, 1, 15, 30, tzinfo=utc)))
-    check("window: 10:30 EDT out", not trader.in_entry_window(datetime(2026, 10, 1, 14, 30, tzinfo=utc)))
-    check("window: 12:30 EDT out (end exclusive)", not trader.in_entry_window(datetime(2026, 10, 1, 16, 30, tzinfo=utc)))
-    check("window: 11:30 EST in (December)", trader.in_entry_window(datetime(2026, 12, 3, 16, 30, tzinfo=utc)))
-    check("window: 10:30 EST out (December)", not trader.in_entry_window(datetime(2026, 12, 3, 15, 30, tzinfo=utc)))
-    check("window: closed on Saturday", not trader.in_entry_window(datetime(2026, 10, 3, 15, 30, tzinfo=utc)))
-    at = datetime(2026, 10, 1, 15, 30, tzinfo=utc)
-    check("scan 25 min before the window start is fresh", trader.scan_fresh({"meta": {"asOf": "2026-10-01T14:35:00+00:00"}}, at))
-    check("scan 40 min before the window start is stale", not trader.scan_fresh({"meta": {"asOf": "2026-10-01T14:20:00+00:00"}}, at))
-    check("no scan is stale", not trader.scan_fresh(None, at))
+    slot = lambda *a: (trader.current_slot(datetime(*a, tzinfo=utc)) or (None,))[0]
+    check("slot: 11:30 EDT is the 11:00 slot", slot(2026, 10, 1, 15, 30) == "2026-10-01T11")
+    check("slot: 10:30 EDT is none", slot(2026, 10, 1, 14, 30) is None)
+    check("slot: 15:30 EDT is the 15:00 slot (the last)", slot(2026, 10, 1, 19, 30) == "2026-10-01T15" and trader.last_slot_of_day("2026-10-01T15") and not trader.last_slot_of_day("2026-10-01T11"))
+    check("slot: 15:55 EDT is none (50 minutes per slot)", slot(2026, 10, 1, 19, 55) is None)
+    check("slot: 16:30 EDT is none", slot(2026, 10, 1, 20, 30) is None)
+    check("slot: 11:30 EST in December", slot(2026, 12, 3, 16, 30) == "2026-12-03T11")
+    check("slot: none on Saturday", slot(2026, 10, 3, 15, 30) is None)
+    start = trader.current_slot(datetime(2026, 10, 1, 15, 30, tzinfo=utc))[1]
+    check("scan 25 min before the slot start is fresh", trader.scan_fresh({"meta": {"asOf": "2026-10-01T14:35:00+00:00"}}, start))
+    check("scan 40 min before the slot start is stale", not trader.scan_fresh({"meta": {"asOf": "2026-10-01T14:20:00+00:00"}}, start))
+    check("no scan is stale", not trader.scan_fresh(None, start))
+    check("manual account capacity: cash is free cash, total is buying power", suggest.capacity({"summary": {"totalValue": 120_000, "equityValue": 20_000, "cash": 60_000}, "equities": [], "options": []}, 16.3, manual=True)["freeCash"] == 60_000)
 
     print()
     if FAILED:

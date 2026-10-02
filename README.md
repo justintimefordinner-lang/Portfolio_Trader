@@ -7,16 +7,20 @@ holds no broker credentials.
 What it suggests:
 
 - short puts to close once 50% of the credit is captured — checked every 15 minutes, all session;
-- once a day, in the 11:00–12:30 ET entry window (the backtest traded at 11:00 ET): new cash-secured puts for every name the Quant
+- at the top of each entry hour (11:00 to 15:00 ET, i.e. 9:00 to 1:00 Mountain): new cash-secured puts for every name the Quant
   scan qualifies, sized to the account; covered calls on 100+ share lots with no call on; notes when a name is over its cap or
-  collateral exceeds cash. When the window opens the trader asks the bridge for a fresh scan and waits for it.
+  collateral exceeds cash. When a slot opens the trader asks the bridge for a fresh scan and waits for it.
+
+Every account the dashboard shows gets its own run — each Schwab login, imported or hand-entered accounts — and each notification
+names the account it is for.
 
 The dashboard's Trader page has a **Run now** button for a full pass any time, any day, against the scan on disk.
 
 **Auto Trader (paper).** The same rules are also traded, without asking, in a manual account named Auto Trader funded with
 `PAPER_CASH` (default $400,000). New puts and calls are booked as positions, closes at 50% and expiries (assignment, called away,
 expired) are settled with the bridge's prices, and each round-trip lands in the account's realized P&L, so the dashboard shows the
-strategy's paper record under that account. Entries happen once a day, in the entry window or on Run now. `TRADER_PAPER=0` turns it off.
+strategy's paper record under that account. Entries follow the same hourly slots (one new put per name per day) or Run now.
+`TRADER_PAPER=0` turns it off.
 
 Each suggestion is pushed once (again after a day, or if the price moves 15%), and logged to `data/trade-suggestions.json`, which the
 dashboard's Trader page shows so you can mark each one good, bad or done.

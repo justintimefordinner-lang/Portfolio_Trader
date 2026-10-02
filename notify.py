@@ -29,13 +29,13 @@ def push(s: dict, cfg: dict | None = None, timeout: float = 15.0) -> bool:
     if not cfg["topic"]:
         return False
     headers = {
-        "Title": s["title"],
+        "Title": (f"{s['account']} · " if s.get("account") else "") + s["title"],
         "Priority": PRIORITY.get(s["kind"], "default"),
         "Tags": TAGS.get(s["kind"], "chart_with_upwards_trend"),
     }
     if cfg["token"]:
         headers["Authorization"] = f"Bearer {cfg['token']}"
-    body = s["detail"] + (f"\n\nRule: {s['rule']}" if s.get("rule") else "")
+    body = s["detail"] + (f"\n\nAccount: {s['account']}" if s.get("account") else "") + (f"\nRule: {s['rule']}" if s.get("rule") else "")
     if cfg["app_url"]:
         link = f"{cfg['app_url']}/trader"
         headers["Click"] = link
