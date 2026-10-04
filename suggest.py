@@ -9,8 +9,9 @@ The rules (the wheel study's combo 87 with 0.75-delta LEAPS):
   * new CSP: the scan's pick for every name that qualifies (no cap on how many,
     like the backtest), sized against this account — the smallest of free cash,
     room under the 10% per-name cap (15% stretch when adding) and room under
-    buying power, in whole contracts; skipped when it spans earnings or the
-    name is already at its cap. Built only in the entry window (trader.py).
+    buying power, in whole contracts; skipped when the name is already at its
+    cap. Built only in the entry window (trader.py). When cash is short, the
+    ranking below decides who gets it (see rank()).
   * close a short put once 50% of its credit is captured
   * on 100+ shares with no call: a 7–21 day call at or above cost, the furthest
     strike still paying 0.5% of basis a week (from the bridge's ladder)
@@ -27,6 +28,20 @@ CASH_EQUIVALENTS = {"SWVXX", "SNVXX", "SNSXX", "SNOXX", "SWGXX", "SNAXX", "SGUXX
 R = {
     "closeAt": 0.5, "maxPerTicker": 0.10, "tickerBand": 0.05,
     "callMinDte": 7, "callMaxDte": 21, "callWeeklyMin": 0.005,
+}
+# Who gets capital first (the user's picks, 2026-10-03). Every pick already pays
+# the 4% target; the score says how good a trade it is:
+#   liquidity — bid/ask spread as a share of the mid (0% best, 30%+ worst), plus open interest
+#   cushion   — the delta it takes to reach 4% (0.10 best, the 0.35 cap worst)
+#   vrp       — the Brief's implied ÷ realized volatility (0.9 worst, 1.3 best; unknown = middle)
+# Names with a report inside the put's life queue after those without one, and a
+# contract worth more than a third of the free cash queues after the smaller ones.
+RANK = {
+    "spreadZero": 30.0, "oiFull": 500, "deltaBest": 0.10, "deltaCap": 0.35,
+    "vrpLo": 0.9, "vrpHi": 1.3,
+    "w": {"liquidity": 0.40, "cushion": 0.35, "vrp": 0.25},
+    "perRound": ((80, 3), (65, 2)),   # score at/above -> contracts per round (else 1)
+    "bigShare": 1 / 3,
 }
 
 
@@ -199,6 +214,31 @@ def fit(pick: dict, sym: str, acct: dict, cap: dict, taken: float = 0.0, taken_s
     return {"contracts": contracts, "held": c > 0, "full": c >= per_cap, "cashShort": cap["freeCash"] < pick["collateral"], "committed": c, "perTickerCap": per_cap}
 
 
+def _unit(x: float) -> float:
+    return max(0.0, min(1.0, x))
+
+
+def rank(pick: dict, vrp_ratio: float | None) -> dict:
+    """0-100 score for a pick that already pays the target, with its parts (0-1)."""
+    sp = pick.get("spreadPct")
+    spread = _unit(1 - sp / RANK["spreadZero"]) if sp is not None else 0.5
+    liquidity = 0.75 * spread + 0.25 * _unit((pick.get("oi") or 0) / RANK["oiFull"])
+    cushion = _unit((RANK["deltaCap"] - abs(pick["delta"])) / (RANK["deltaCap"] - RANK["deltaBest"]))
+    vrp = _unit((vrp_ratio - RANK["vrpLo"]) / (RANK["vrpHi"] - RANK["vrpLo"])) if vrp_ratio else 0.5
+    w = RANK["w"]
+    score = 100 * (w["liquidity"] * liquidity + w["cushion"] * cushion + w["vrp"] * vrp)
+    per_round = next((n for lo, n in RANK["perRound"] if score >= lo), 1)
+    return {"score": round(score, 1), "liquidity": round(liquidity, 2), "cushion": round(cushion, 2),
+            "vrp": round(vrp, 2), "vrpRatio": vrp_ratio, "spreadPct": sp, "perRound": per_round}
+
+
+def _rank_text(rk: dict, pick: dict) -> str:
+    parts = [f"spread {rk['spreadPct']:.0f}% of mid" if rk["spreadPct"] is not None else "spread unknown",
+             f"{abs(pick['delta']):.2f}Δ to reach the target",
+             f"IV/RV {rk['vrpRatio']:.2f}" if rk["vrpRatio"] else "IV/RV unknown"]
+    return f" Rank {round(rk['score'])} ({', '.join(parts)})."
+
+
 # ---- the suggestions ---------------------------------------------------------
 def _money(n: float) -> str:
     return f"${round(n):,}"
@@ -211,15 +251,15 @@ def _replacement(o: dict, picks: list, acct: dict, cap: dict) -> dict | None:
     freed = o["strike"] * MULT * o["qty"]
     cap2 = {**cap, "freeCash": cap["freeCash"] + freed}
     acct2 = {**acct, "options": [x for x in acct["options"] if x is not o]}  # the closing put no longer counts
-    ordered = [t for t in picks if t[2]["sym"] == o["symbol"]] + [t for t in picks if t[2]["sym"] != o["symbol"]]
-    for _, _, row, p, score in ordered:
+    ordered = [t for t in picks if t[1]["sym"] == o["symbol"]] + [t for t in picks if t[1]["sym"] != o["symbol"]]
+    for _, row, p, rk in ordered:
         f = fit(p, row["sym"], acct2, cap2)
         if f["contracts"] < 1 or f["full"]:
             continue
         n = max(1, min(f["contracts"], int(freed // p["collateral"])))
         return {"symbol": row["sym"], "strike": p["strike"], "expiration": p["exp"], "dte": p["dte"], "qty": n,
                 "price": p["mark"], "yield30": p["yield30"], "delta": p["delta"], "collateral": p["collateral"] * n,
-                "score": score}
+                "score": rk["score"]}
     return None
 
 
@@ -238,24 +278,28 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
     today = today or date.today()
     out: list[dict] = []
 
-    # The scan's candidates under the STUDY's rule, best-ranked first (Brief score,
-    # then yield); a report inside the put's life sets a name aside.
+    # The scan's candidates under the STUDY's rule, in queue order: names without a
+    # report inside the put's life first, contracts under a third of the free cash
+    # before bigger ones, then by rank() (yield, then symbol, break ties).
     scan = ctx.get("scan") or {}
     report = ctx.get("report") or {}
     scored = {r["sym"]: r for r in (report.get("screened") or report.get("board") or [])}
+    big_at = RANK["bigShare"] * max(cap["freeCash"], 0)
     picks = []
     for row in scan.get("rows") or []:
         p = study_pick(row)
         if not p:
             continue
-        er_days = row.get("erDays")
-        if er_days is not None and 0 <= er_days <= p["dte"]:
-            continue
         if _dte(p["exp"], today) < 20:
             continue  # a stale scan: the contract is no longer in the window
-        score = (scored.get(row["sym"]) or {}).get("score")
-        picks.append((-(score if score is not None else -1), -p["yield30"], row, p, score))
-    picks.sort(key=lambda t: (t[0], t[1]))
+        er_days = row.get("erDays")
+        rk = rank(p, (scored.get(row["sym"]) or {}).get("vrpRatio"))
+        rk["earnings"] = er_days if er_days is not None and 0 <= er_days <= p["dte"] else None
+        rk["big"] = p["collateral"] > big_at
+        if rk["big"]:
+            rk["perRound"] = 1
+        picks.append(((rk["earnings"] is not None, rk["big"], -rk["score"], -p["yield30"], row["sym"]), row, p, rk))
+    picks.sort(key=lambda t: t[0])
 
     # 1. Close at 50% — paired with the replacement the rule would sell with the
     #    freed collateral: the same name if it still pays, else the best-ranked one.
@@ -285,25 +329,26 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
             s["accountId"] = acct_id
         return out
 
-    # 2. New CSPs from the scan: every name that qualifies, in Brief-score then yield order.
-    # Capital goes round-robin — one contract per name per round, best ranked first,
-    # until the cash or every name's room is used — so a day with room for four
-    # puts spreads them over four names rather than handing all four to the first.
-    # (The user's call: the Brief's score orders the queue, it doesn't concentrate.)
+    # 2. New CSPs from the scan: every name that qualifies, in queue order.
+    # Capital goes in weighted rounds — each round a name takes 1 contract, 2 at
+    # rank 65+, 3 at rank 80+ (a big contract always 1) — until the cash or every
+    # name's room is used. Plenty of cash: everyone fills to the cap as before;
+    # short cash: the better trades get it first, still spread over several names.
     alloc: dict[str, int] = {}
     spent = 0.0
     progress = True
     while progress:
         progress = False
-        for _, _, row, p, score in picks:
+        for _, row, p, rk in picks:
             sym = row["sym"]
-            f = fit(p, sym, acct, {**cap, "freeCash": cap["freeCash"] - spent}, spent, alloc.get(sym, 0) * p["collateral"], stretch=sym not in alloc)
-            if f["contracts"] < 1 or f["full"]:
-                continue
-            alloc[sym] = alloc.get(sym, 0) + 1
-            spent += p["collateral"]
-            progress = True
-    for _, _, row, p, score in picks:
+            for _ in range(rk["perRound"]):
+                f = fit(p, sym, acct, {**cap, "freeCash": cap["freeCash"] - spent}, spent, alloc.get(sym, 0) * p["collateral"], stretch=sym not in alloc)
+                if f["contracts"] < 1 or f["full"]:
+                    break
+                alloc[sym] = alloc.get(sym, 0) + 1
+                spent += p["collateral"]
+                progress = True
+    for _, row, p, rk in picks:
         n = alloc.get(row["sym"], 0)
         if n < 1:
             continue
@@ -315,10 +360,12 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
             "title": f"Sell {n} × {row['sym']} ${p['strike']:g} put ({p['exp'][5:]}, {p['dte']}d)",
             "detail": (f"{p['yield30']:.1f}% per 30 days at the {p['mark']:.2f} mid ({p['bid']:.2f}–{p['ask']:.2f}), {p['delta']:.2f}Δ, "
                        f"{p['belowSpotPct']:.1f}% below ${row['price']:.2f}. {_money(p['collateral'] * n)} collateral, {_money(p['mark'] * MULT * n)} credit."
-                       + (f" Brief score {round(score)}." if score is not None else "")
+                       + _rank_text(rk, p)
+                       + (f" Earnings in {rk['earnings']}d — queued after names without a report." if rk["earnings"] is not None else "")
                        + (" Already held — this adds." if f["held"] else "")),
             "amount": round(p["mark"] * MULT * n, 2),
             "rule": "4% target",
+            "rank": rk["score"],
         })
 
     # 3. Covered calls on 100+ shares with no call on.

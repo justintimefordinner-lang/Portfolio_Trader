@@ -70,7 +70,7 @@ def main() -> int:
         {"sym": "STU", "price": 50, "pick": pick(48, 35, far, 2.5, 5.2, 0.45, 4_800), "study": pick(44, 35, far, 1.8, 4.1, 0.28, 4_400), "best": None, "reason": "ok", "erDate": None, "erDays": None, "erInWindow": False}
     ]}
     json.dump(scan, open(os.path.join(data, "quant-scan.json"), "w"))
-    json.dump({"board": [], "screened": [{"sym": "FTNT", "score": 90, "tier": "S"}, {"sym": "KLAC", "score": 70, "tier": "A"}]}, open(os.path.join(data, "am_report.json"), "w"))
+    json.dump({"board": [], "screened": [{"sym": "FTNT", "score": 50, "tier": "S", "vrpRatio": 1.3}, {"sym": "KLAC", "score": 90, "tier": "A", "vrpRatio": 1.0}]}, open(os.path.join(data, "am_report.json"), "w"))
     json.dump({"inputs": {"vix": 16.3}}, open(os.path.join(data, "vix.json"), "w"))
 
     print("capacity")
@@ -88,20 +88,32 @@ def main() -> int:
     kinds = {(s["kind"], s["symbol"]) for s in sug}
     check("HOOD put at 60% -> close", ("close", "HOOD") in kinds)
     check("SOFI put at 29% -> no close", ("close", "SOFI") not in kinds)
-    check("MU skipped: earnings inside the put", ("csp", "MU") not in kinds)
     check("BIG skipped: one contract is over the per-name cap", ("csp", "BIG") not in kinds)
     csps = [s for s in sug if s["kind"] == "csp"]
-    check("every qualifying name is suggested — no cap on the count", len(csps) == 9, str([s["symbol"] for s in csps]))
+    check("every qualifying name is suggested — no cap on the count", len(csps) == 10, str([s["symbol"] for s in csps]))
+    mu = next((s for s in csps if s["symbol"] == "MU"), None)
+    check("MU (earnings inside the put) is not skipped: queued last and says why", mu is not None and csps[-1]["symbol"] == "MU" and "Earnings in 12d" in mu["detail"], str([s["symbol"] for s in csps]))
+
+    print("ranking")
+    base = pick(170, 30, far, 7.0, 4.1, 0.30, 17_000)
+    rk = suggest.rank(base, 1.3)
+    check("rank: 2% spread, deep OI, 0.30Δ, IV/RV 1.3 -> 70, two contracts a round", rk["score"] == 70.0 and rk["perRound"] == 2, str(rk))
+    check("rank: a 20% spread scores lower than a 2% one", suggest.rank({**base, "spreadPct": 20.0}, 1.3)["score"] < rk["score"])
+    check("rank: reaching 4% at 0.15Δ beats reaching it at 0.30Δ", suggest.rank({**base, "delta": 0.15}, 1.3)["score"] > rk["score"])
+    check("rank: unknown IV/RV counts as the middle", suggest.rank(base, None)["vrp"] == 0.5)
     stu = next((s for s in csps if s["symbol"] == "STU"), None)
     check("the trader takes the study's pick, not the page's custom one", stu is not None and stu["strike"] == 44, str(stu and (stu["strike"], stu["qty"])))
     hood_close = next(s for s in sug if s["kind"] == "close" and s["symbol"] == "HOOD")
     rep = hood_close.get("replacement")
     check("a close is paired with the best-ranked replacement, sized to the freed collateral", rep is not None and rep["symbol"] == "FTNT" and rep["qty"] == 1 and "Replace with: sell 1 × FTNT $170 put" in hood_close["detail"], str(rep))
-    check("FTNT (Brief 90) ranks above KLAC (70) despite lower yield", [s["symbol"] for s in csps][:2] == ["FTNT", "KLAC"], str([s["symbol"] for s in csps]))
-    tight = suggest.build(suggest.load_context(data), None, today=date.today(), cap={**cap, "freeCash": 20_000})
-    check("room for one put: only the best-ranked name is suggested", [s["symbol"] for s in tight if s["kind"] == "csp"] == ["FTNT"], str([(s["symbol"], s["qty"]) for s in tight if s["kind"] == "csp"]))
-    rr = {s["symbol"]: s["qty"] for s in suggest.build(suggest.load_context(data), None, today=date.today(), cap={**cap, "freeCash": 30_000}) if s["kind"] == "csp"}
-    check("round-robin: $30k spreads one contract per name (FTNT, X0, X1), not two to X0", rr == {"FTNT": 1, "X0": 1, "X1": 1}, str(rr))
+    order = [s["symbol"] for s in csps]
+    check("queue follows the rank, not the Brief score: FTNT (70) first, KLAC (0.34Δ, IV/RV 1.0) after the X names", order[0] == "FTNT" and order.index("KLAC") > order.index("X5"), str(order))
+    ftnt = next(s for s in csps if s["symbol"] == "FTNT")
+    check("the detail explains the rank", "Rank 70 (spread 2% of mid, 0.30Δ to reach the target, IV/RV 1.30)" in ftnt["detail"] and ftnt["rank"] == 70.0, ftnt["detail"])
+    tight = {s["symbol"]: s["qty"] for s in suggest.build(suggest.load_context(data), None, today=date.today(), cap={**cap, "freeCash": 20_000}) if s["kind"] == "csp"}
+    check("$20k: FTNT's $17k contract (over a third of the cash) waits; four smaller names get one each", tight == {"STU": 1, "X0": 1, "X1": 1, "X2": 1}, str(tight))
+    rr = {s["symbol"]: s["qty"] for s in suggest.build(suggest.load_context(data), None, today=date.today(), cap={**cap, "freeCash": 60_000}) if s["kind"] == "csp"}
+    check("$60k: FTNT (rank 70) takes two in its round, then one each down the queue", rr == {"FTNT": 2, "STU": 1, "X0": 1, "X1": 1, "X2": 1, "X3": 1}, str(rr))
     closes_only = suggest.build(suggest.load_context(data), None, today=date.today(), entries=False)
     check("outside the window only closes are built", {s["kind"] for s in closes_only} == {"close"}, str({s["kind"] for s in closes_only}))
     klac = next(s for s in csps if s["symbol"] == "KLAC")
