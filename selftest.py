@@ -111,7 +111,7 @@ def main() -> int:
     ftnt = next(s for s in csps if s["symbol"] == "FTNT")
     check("the detail explains the rank", "Rank 70 (spread 2% of mid, 0.30Δ to reach the target, IV/RV 1.30)" in ftnt["detail"] and ftnt["rank"] == 70.0, ftnt["detail"])
     tight = {s["symbol"]: s["qty"] for s in suggest.build(suggest.load_context(data), None, today=date.today(), cap={**cap, "freeCash": 20_000}) if s["kind"] == "csp"}
-    check("$20k: FTNT's $17k contract (over a third of the cash) waits; four smaller names get one each", tight == {"STU": 1, "X0": 1, "X1": 1, "X2": 1}, str(tight))
+    check("$20k: room for one put — the best-ranked name (FTNT) gets it", tight == {"FTNT": 1}, str(tight))
     rr = {s["symbol"]: s["qty"] for s in suggest.build(suggest.load_context(data), None, today=date.today(), cap={**cap, "freeCash": 60_000}) if s["kind"] == "csp"}
     check("$60k: FTNT (rank 70) takes two in its round, then one each down the queue", rr == {"FTNT": 2, "STU": 1, "X0": 1, "X1": 1, "X2": 1, "X3": 1}, str(rr))
     closes_only = suggest.build(suggest.load_context(data), None, today=date.today(), entries=False)

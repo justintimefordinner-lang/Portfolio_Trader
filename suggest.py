@@ -34,14 +34,14 @@ R = {
 #   liquidity — bid/ask spread as a share of the mid (0% best, 30%+ worst), plus open interest
 #   cushion   — the delta it takes to reach 4% (0.10 best, the 0.35 cap worst)
 #   vrp       — the Brief's implied ÷ realized volatility (0.9 worst, 1.3 best; unknown = middle)
-# Names with a report inside the put's life queue after those without one, and a
-# contract worth more than a third of the free cash queues after the smaller ones.
+# Names with a report inside the put's life queue after those without one.
+# (Backtested 2026-10-04: queuing contracts over a third of the free cash behind
+# smaller ones changed nothing at $800k and cost a little at $150k, so it's out.)
 RANK = {
     "spreadZero": 30.0, "oiFull": 500, "deltaBest": 0.10, "deltaCap": 0.35,
     "vrpLo": 0.9, "vrpHi": 1.3,
     "w": {"liquidity": 0.40, "cushion": 0.35, "vrp": 0.25},
     "perRound": ((80, 3), (65, 2)),   # score at/above -> contracts per round (else 1)
-    "bigShare": 1 / 3,
 }
 
 
@@ -279,12 +279,10 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
     out: list[dict] = []
 
     # The scan's candidates under the STUDY's rule, in queue order: names without a
-    # report inside the put's life first, contracts under a third of the free cash
-    # before bigger ones, then by rank() (yield, then symbol, break ties).
+    # report inside the put's life first, then by rank() (yield, then symbol, break ties).
     scan = ctx.get("scan") or {}
     report = ctx.get("report") or {}
     scored = {r["sym"]: r for r in (report.get("screened") or report.get("board") or [])}
-    big_at = RANK["bigShare"] * max(cap["freeCash"], 0)
     picks = []
     for row in scan.get("rows") or []:
         p = study_pick(row)
@@ -295,10 +293,7 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
         er_days = row.get("erDays")
         rk = rank(p, (scored.get(row["sym"]) or {}).get("vrpRatio"))
         rk["earnings"] = er_days if er_days is not None and 0 <= er_days <= p["dte"] else None
-        rk["big"] = p["collateral"] > big_at
-        if rk["big"]:
-            rk["perRound"] = 1
-        picks.append(((rk["earnings"] is not None, rk["big"], -rk["score"], -p["yield30"], row["sym"]), row, p, rk))
+        picks.append(((rk["earnings"] is not None, -rk["score"], -p["yield30"], row["sym"]), row, p, rk))
     picks.sort(key=lambda t: t[0])
 
     # 1. Close at 50% — paired with the replacement the rule would sell with the
@@ -331,7 +326,7 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
 
     # 2. New CSPs from the scan: every name that qualifies, in queue order.
     # Capital goes in weighted rounds — each round a name takes 1 contract, 2 at
-    # rank 65+, 3 at rank 80+ (a big contract always 1) — until the cash or every
+    # rank 65+, 3 at rank 80+ — until the cash or every
     # name's room is used. Plenty of cash: everyone fills to the cap as before;
     # short cash: the better trades get it first, still spread over several names.
     alloc: dict[str, int] = {}
