@@ -129,14 +129,21 @@ def credits(acct: dict) -> float:
     return sum(p["premium"] * MULT * p["qty"] for p in acct["positions"] if p.get("type") == "option" and p.get("side") == "short")
 
 
-def capacity(acct: dict, snap_acct: dict | None, vix: float | None) -> dict:
+def capacity(acct: dict, snap_acct: dict | None, vix: float | None, sz: dict | None = None) -> dict:
     """Free cash the way the dashboard and the backtest count it: cash beyond the
-    collateral, plus the premiums collected (the dashboard's uncommitted cash)."""
+    collateral, plus the premiums collected (the dashboard's uncommitted cash).
+    `sz` is suggest.sizing() for this account: the VIX margin toggle, the VIX cash
+    reserve toggle and any extra margin, the same as every other account."""
+    sz = sz or {"vixMargin": True, "vixCash": False, "extraMargin": 0.0}
     total = float(((snap_acct or {}).get("summary") or {}).get("totalValue") or acct["cash"])
-    margin = suggest.vix_margin(vix)
+    margin = suggest.vix_margin(vix if sz["vixMargin"] else None)
+    extra = sz["extraMargin"]
     collateral = sum(p["strike"] * MULT * p["qty"] for p in acct["positions"] if p.get("type") == "option" and p.get("side") == "short" and p.get("optionType") == "put")
-    return {"totalValue": total, "margin": margin, "buyingPower": total * (1 + margin),
-            "freeCash": float(acct["cash"]) + credits(acct) + margin * total, "putObligations": collateral}
+    free = float(acct["cash"]) + credits(acct) + margin * total + extra
+    if sz["vixCash"]:
+        free = max(0.0, free - suggest.vix_reserve(vix) * total)
+    return {"totalValue": total, "margin": margin, "extraMargin": extra, "buyingPower": total * (1 + margin) + extra,
+            "freeCash": free, "putObligations": collateral}
 
 
 # ---- closed records, in the dashboard's shapes ------------------------------------
@@ -330,7 +337,7 @@ def run(ctx: dict, data_dir: str, entries: bool, today: date, vix: float | None,
     trades += settle_expired(data_dir, acct, snap_acct, today, when)
     view = snap_acct or _synthetic(acct)
     ctx_paper = {**ctx, "snapshot": {"data": {PAPER_ID: view}}}
-    cap = capacity(acct, snap_acct, vix)
+    cap = capacity(acct, snap_acct, vix, suggest.sizing(ctx, PAPER_ID))
     sug = suggest.build(ctx_paper, PAPER_ID, today=today, entries=entries, cap=cap)
     traded_today = {t.get("symbol") for t in trades if t.get("kind") == "csp" and str(t.get("at", ""))[:10] == today.isoformat()}
     trades += apply(data_dir, acct, [s for s in sug if s["kind"] in ("csp", "close", "cc")], today, when, traded_today)

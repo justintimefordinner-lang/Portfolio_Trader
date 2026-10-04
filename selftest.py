@@ -121,7 +121,27 @@ def main() -> int:
     cc = next((s for s in sug if s["kind"] == "cc"), None)
     # 215/21d pays 2.5/180/3 = 0.46%/wk, under the floor; 210/14d pays 0.67%/wk. 30d is outside 7–21.
     check("AAPL covered call: furthest strike paying 0.5%/wk, 7-21d", cc is not None and cc["strike"] == 210 and cc["qty"] == 2, json.dumps(cc)[:120] if cc else "none")
-    check("no notes when inside the rules", not [s for s in sug if s["kind"] == "note"])
+    leaps = [s for s in sug if s["key"].startswith("note|leaps|")]
+    check("AAPL 200 shares, no long call: a note to buy 2 ~0.75Δ ~450-day LEAPS", [s["symbol"] for s in leaps] == ["AAPL"] and leaps[0]["title"].startswith("Buy 2 × AAPL ~0.75Δ LEAPS"), str([s["title"] for s in leaps]))
+    check("no other notes when inside the rules", not [s for s in sug if s["kind"] == "note" and not s["key"].startswith("note|leaps|")])
+
+    print("sizing settings (shared with the Quant pages)")
+    sz0 = suggest.sizing(suggest.load_context(data), "ACC2")
+    check("no settings file: the study's sizing", sz0 == {"maxPerTicker": 0.10, "tickerBand": 0.05, "vixMargin": True, "vixCash": False, "extraMargin": 0.0}, str(sz0))
+    acct2 = snap["data"]["ACC2"]
+    base2 = suggest.capacity(acct2, None)
+    more2 = suggest.capacity(acct2, None, extra=20_000)
+    check("extra margin adds to buying power and free cash alike", more2["buyingPower"] - base2["buyingPower"] == 20_000 and more2["freeCash"] - base2["freeCash"] == 20_000, f"{base2} -> {more2}")
+    json.dump({"maxPerTicker": 0.2, "vixMargin": False, "vixCash": True, "extraMargin": {"ACC2": 25_000, "ACC1": "junk"}}, open(os.path.join(data, "quant-settings.json"), "w"))
+    ctx_s = suggest.load_context(data)
+    sz2 = suggest.sizing(ctx_s, "ACC2")
+    check("settings file read: 20% per name, VIX margin off, cash reserve on, $25k extra for ACC2 only", sz2["maxPerTicker"] == 0.2 and not sz2["vixMargin"] and sz2["vixCash"] and sz2["extraMargin"] == 25_000 and suggest.sizing(ctx_s, "ACC1")["extraMargin"] == 0.0, str(sz2))
+    check("VIX cash reserve: band midpoint (16.3 -> 22.5%)", suggest.vix_reserve(16.3) == 0.225)
+    # ACC2: $50k account. 20% cap with $25k extra = $15k per name; reserve 22.5% of $50k held back.
+    sug_s = suggest.build(ctx_s, "ACC2", today=date.today())
+    ftnt2 = next((s for s in sug_s if s["kind"] == "csp" and s["symbol"] == "FTNT"), None)
+    check("ACC2 with extra margin and a 20% cap now fits FTNT's $17k put (it couldn't at $5k a name)", ftnt2 is not None and ftnt2["qty"] == 1, str([(s["symbol"], s["qty"]) for s in sug_s if s["kind"] == "csp"]))
+    os.remove(os.path.join(data, "quant-settings.json"))
 
     print("pushes + the file")
     sent_bodies: list[dict] = []

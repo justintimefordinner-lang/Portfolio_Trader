@@ -6,15 +6,19 @@ VIX), applies the same rules the dashboard's Quant pages apply, and returns a
 list of suggestions. Nothing here talks to a broker or a phone.
 
 The rules (the wheel study's combo 87 with 0.75-delta LEAPS):
-  * new CSP: the scan's pick for every name that qualifies (no cap on how many,
-    like the backtest), sized against this account — the smallest of free cash,
-    room under the 10% per-name cap (15% stretch when adding) and room under
-    buying power, in whole contracts; skipped when the name is already at its
-    cap. Built only in the entry window (trader.py). When cash is short, the
-    ranking below decides who gets it (see rank()).
+  * new CSP: the scan's `study` pick (lowest delta paying 4% per 30 days, ≤0.35Δ,
+    in the expiration closest to 35 days) for every name that qualifies (no cap
+    on how many, like the backtest), sized against this account — the smallest
+    of free cash, room under the per-name cap (10%, one contract may stretch to
+    15%) and room under buying power, in whole contracts. Built only in the entry
+    window (trader.py). When cash is short, rank() decides who gets it.
+  * sizing follows the Quant page's Settings (sizing()): per-name cap and stretch,
+    the VIX margin allowance and cash reserve toggles, and each account's extra
+    margin — the same numbers the scan page and the portfolio check use
   * close a short put once 50% of its credit is captured
   * on 100+ shares with no call: a 7–21 day call at or above cost, the furthest
     strike still paying 0.5% of basis a week (from the bridge's ladder)
+  * on 100+ shares with no long call: a note to buy a ~0.75Δ ~450-day LEAPS
   * notes: a name over its cap, collateral beyond cash and the VIX allowance
 """
 from __future__ import annotations
@@ -92,6 +96,43 @@ def load_context(data_dir: str) -> dict:
         "scan": _read(os.path.join(data_dir, "quant-scan.json")),
         "report": _read(os.path.join(data_dir, "am_report.json")),
         "vix": _read(os.path.join(data_dir, "vix.json")),
+        "settings": _read(os.path.join(data_dir, "quant-settings.json")),
+    }
+
+
+# The VIX page's cash reserve per band (lib/vix.ts GUIDE): the midpoint is held back
+# when the Quant Settings' "follow the VIX cash allocation" is on.
+VIX_CASH = ((12, 0.40, 0.50), (15, 0.30, 0.40), (20, 0.20, 0.25), (25, 0.10, 0.15), (30, 0.05, 0.10), (float("inf"), 0.0, 0.05))
+
+
+def vix_reserve(vix: float | None) -> float:
+    if vix is None:
+        return 0.0
+    for top, lo, hi in VIX_CASH:
+        if vix < top:
+            return round((lo + hi) / 2, 4)
+    return 0.025
+
+
+def sizing(ctx: dict, account_id: str | None) -> dict:
+    """The Quant page's sizing Settings (data/quant-settings.json), which the scan
+    page, the portfolio check and the trader all follow: per-name cap and stretch,
+    the VIX margin allowance and cash reserve toggles, and this account's extra
+    margin. Out-of-range values fall back to the study's. The PICK rule is not
+    here: the trader always sells the scan's `study` pick."""
+    s = ctx.get("settings") or {}
+
+    def num(key: str, lo: float, hi: float, default: float) -> float:
+        v = s.get(key)
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and lo <= v <= hi else default
+
+    extra = (s.get("extraMargin") or {}).get(account_id or "") if isinstance(s.get("extraMargin"), dict) else None
+    return {
+        "maxPerTicker": num("maxPerTicker", 0.01, 0.5, R["maxPerTicker"]),
+        "tickerBand": num("tickerBand", 0.0, 0.25, R["tickerBand"]),
+        "vixMargin": s.get("vixMargin", True) is not False,
+        "vixCash": s.get("vixCash") is True,
+        "extraMargin": float(extra) if isinstance(extra, (int, float)) and not isinstance(extra, bool) and extra > 0 else 0.0,
     }
 
 
@@ -151,28 +192,25 @@ def vix_margin(vix: float | None) -> float:
     return min(0.35, 0.05 * int(vix // 5))
 
 
-def capacity(acct: dict, vix: float | None, manual: bool = False) -> dict:
+def capacity(acct: dict, vix: float | None, manual: bool = False, extra: float = 0.0) -> dict:
     """Free cash and buying power. A broker account's total is liquidation value, so
     cash is backed out of it; a manual account (hand-entered or imported) carries
-    its own `cash`, already net of what secures its puts."""
+    its own `cash`, already net of what secures its puts. `extra` is the account's
+    extra margin from the Quant Settings, added to buying power and free cash."""
     s, eq, opts = acct["summary"], acct["equities"], acct["options"]
     margin = vix_margin(vix)
+    extra = max(0.0, extra)
     if manual:
         free = max(0.0, float(s.get("cash") or 0))
-        return {
-            "totalValue": s["totalValue"], "margin": margin,
-            "buyingPower": s["totalValue"] * (1 + margin),
-            "freeCash": free + margin * s["totalValue"],
-            "putObligations": csp_collateral(opts) + spread_cash_requirement(opts),
-        }
-    options_net = sum((1 if o["side"] == "long" else -1) * o["mark"] * MULT * o["qty"] for o in opts)
-    cash = s["totalValue"] - s["equityValue"] - s.get("cryptoValue", 0) - options_net
-    money_market = sum(e["qty"] * e["price"] for e in eq if e["symbol"] in CASH_EQUIVALENTS)
-    free = max(0.0, cash + money_market - csp_collateral(opts) - spread_cash_requirement(opts))
+    else:
+        options_net = sum((1 if o["side"] == "long" else -1) * o["mark"] * MULT * o["qty"] for o in opts)
+        cash = s["totalValue"] - s["equityValue"] - s.get("cryptoValue", 0) - options_net
+        money_market = sum(e["qty"] * e["price"] for e in eq if e["symbol"] in CASH_EQUIVALENTS)
+        free = max(0.0, cash + money_market - csp_collateral(opts) - spread_cash_requirement(opts))
     return {
-        "totalValue": s["totalValue"], "margin": margin,
-        "buyingPower": s["totalValue"] * (1 + margin),
-        "freeCash": free + margin * s["totalValue"],
+        "totalValue": s["totalValue"], "margin": margin, "extraMargin": extra,
+        "buyingPower": s["totalValue"] * (1 + margin) + extra,
+        "freeCash": free + margin * s["totalValue"] + extra,
         "putObligations": csp_collateral(opts) + spread_cash_requirement(opts),
     }
 
@@ -202,13 +240,14 @@ def fit(pick: dict, sym: str, acct: dict, cap: dict, taken: float = 0.0, taken_s
     `taken` is collateral already handed out in this pass; `taken_sym` the part of
     it that went to this name. `stretch` allows the one-contract overshoot."""
     c = committed(sym, acct) + taken_sym
-    per_cap = R["maxPerTicker"] * cap["buyingPower"]
+    per_name = cap.get("maxPerTicker", R["maxPerTicker"])
+    per_cap = per_name * cap["buyingPower"]
     room_ticker = per_cap - c
     room_total = cap["buyingPower"] - committed_total(acct) - taken
     room = min(room_ticker, room_total, cap["freeCash"])
     contracts = int(room // pick["collateral"]) if room > 0 else 0
     if contracts < 1 and room_ticker > 0 and stretch:
-        cap_hi = (R["maxPerTicker"] + R["tickerBand"]) * cap["buyingPower"] - c
+        cap_hi = (per_name + cap.get("tickerBand", R["tickerBand"])) * cap["buyingPower"] - c
         if cap_hi >= pick["collateral"] and min(room_total, cap["freeCash"]) >= pick["collateral"]:
             contracts = 1
     return {"contracts": contracts, "held": c > 0, "full": c >= per_cap, "cashShort": cap["freeCash"] < pick["collateral"], "committed": c, "perTickerCap": per_cap}
@@ -274,7 +313,12 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
     if not acct:
         return []
     vix = ((ctx.get("vix") or {}).get("inputs") or {}).get("vix")
-    cap = cap or capacity(acct, vix, manual=acct_id.startswith("manual-"))
+    sz = sizing(ctx, acct_id)
+    if cap is None:
+        cap = capacity(acct, vix if sz["vixMargin"] else None, manual=acct_id.startswith("manual-"), extra=sz["extraMargin"])
+        if sz["vixCash"]:
+            cap["freeCash"] = max(0.0, cap["freeCash"] - vix_reserve(vix) * cap["totalValue"])
+    cap = {"maxPerTicker": sz["maxPerTicker"], "tickerBand": sz["tickerBand"], **cap}
     today = today or date.today()
     out: list[dict] = []
 
@@ -389,20 +433,38 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
             "rule": "covered call",
         })
 
-    # 4. Notes: outside the rules.
+    # 4. LEAPS on assigned shares: the study buys one ~0.75-delta call ~450 days out
+    #    per 100 shares (a note: the bridge doesn't price LEAPS chains for the trader).
+    long_calls = {o["symbol"] for o in acct["options"] if o["side"] == "long" and o["optionType"] == "call"}
+    for sym, lots in by_sym.items():
+        shares = sum(e["qty"] for e in lots)
+        if shares < 100 or sym in long_calls or sym in CASH_EQUIVALENTS:
+            continue
+        n = shares // 100
+        out.append({"key": f"note|leaps|{sym}", "kind": "note", "symbol": sym,
+                    "title": f"Buy {n} × {sym} ~0.75Δ LEAPS call, ~450 days out",
+                    "detail": f"{shares} shares with no long call under them. The study pairs each 100 shares with a deep call "
+                              f"(0.75 delta, 420–480 days) bought right away — waiting for a MACD turn did worse — and sells it "
+                              f"when the shares are called away or it gets within 90 days. Skip this for shares you hold long-term.",
+                    "rule": "LEAPS on shares"})
+
+    # 5. Notes: outside the rules.
     if cap["freeCash"] < 0:
         out.append({"key": "note|cash", "kind": "note", "symbol": "—",
                     "title": f"Collateral exceeds cash by {_money(-cap['freeCash'])}",
-                    "detail": f"{_money(cap['putObligations'])} pledged; margin allowance {round(cap['margin'] * 100)}% at VIX {vix if vix is not None else '?'}.",
+                    "detail": f"{_money(cap['putObligations'])} pledged; margin allowance {round(cap['margin'] * 100)}% at VIX {vix if vix is not None else '?'}"
+                              + (f", plus {_money(cap['extraMargin'])} extra margin." if cap.get("extraMargin") else "."),
                     "amount": round(-cap["freeCash"], 2), "rule": "cash-secured"})
-    cap_hi = (R["maxPerTicker"] + R["tickerBand"]) * cap["buyingPower"]
+    per_name = cap["maxPerTicker"]
+    cap_lo = per_name * cap["buyingPower"]
+    cap_hi = (per_name + cap["tickerBand"]) * cap["buyingPower"]
     for sym in sorted({o["symbol"] for o in acct["options"]} | {e["symbol"] for e in acct["equities"]}):
         c = committed(sym, acct)
         if c > cap_hi:
             out.append({"key": f"note|cap|{sym}", "kind": "note", "symbol": sym,
-                        "title": f"{sym} is {_money(c - R['maxPerTicker'] * cap['buyingPower'])} over its cap",
-                        "detail": f"{_money(c)} in {sym} against a {_money(R['maxPerTicker'] * cap['buyingPower'])} 10% cap ({_money(cap_hi)} stretch).",
-                        "amount": round(c - R["maxPerTicker"] * cap["buyingPower"], 2), "rule": "10% per name"})
+                        "title": f"{sym} is {_money(c - cap_lo)} over its cap",
+                        "detail": f"{_money(c)} in {sym} against a {_money(cap_lo)} {round(per_name * 100)}% cap ({_money(cap_hi)} stretch).",
+                        "amount": round(c - cap_lo, 2), "rule": f"{round(per_name * 100)}% per name"})
 
     for s in out:
         s["accountId"] = acct_id
