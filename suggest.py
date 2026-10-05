@@ -423,7 +423,7 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
             continue
         top = max(c["strike"] for c in ok)
         pick = max((c for c in ok if c["strike"] == top), key=lambda c: (c["mark"] / basis) / (c["dte"] / 7))
-        n = shares // 100
+        n = int(shares // 100)
         out.append({
             "key": f"cc|{sym}|{pick['strike']}|{pick['dte']}",
             "kind": "cc", "symbol": sym, "strike": pick["strike"], "qty": n, "price": pick["mark"], "dte": pick["dte"],
@@ -440,10 +440,10 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
         shares = sum(e["qty"] for e in lots)
         if shares < 100 or sym in long_calls or sym in CASH_EQUIVALENTS:
             continue
-        n = shares // 100
+        n = int(shares // 100)
         out.append({"key": f"note|leaps|{sym}", "kind": "note", "symbol": sym,
                     "title": f"Buy {n} × {sym} ~0.75Δ LEAPS call, ~450 days out",
-                    "detail": f"{shares} shares with no long call under them. The study pairs each 100 shares with a deep call "
+                    "detail": f"{shares:g} shares with no long call under them. The study pairs each 100 shares with a deep call "
                               f"(0.75 delta, 420–480 days) bought right away — waiting for a MACD turn did worse — and sells it "
                               f"when the shares are called away or it gets within 90 days. Skip this for shares you hold long-term.",
                     "rule": "LEAPS on shares"})

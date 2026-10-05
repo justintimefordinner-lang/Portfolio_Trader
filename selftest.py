@@ -35,7 +35,7 @@ def main() -> int:
     snap = {"data": {"ACC1": {
         "summary": {"totalValue": 1_000_000, "equityValue": 110_000, "cryptoValue": 0, "cash": 0},
         "equities": [
-            {"symbol": "AAPL", "qty": 200, "avgCost": 180, "price": 200, "coveredCalls": [
+            {"symbol": "AAPL", "qty": 200.0, "avgCost": 180, "price": 200, "coveredCalls": [
                 {"targetDte": 14, "dte": 14, "strike": 210, "delta": 0.3, "mark": 2.4, "premPct": 1.2, "annPct": 31, "oi": 100},
                 {"targetDte": 21, "dte": 21, "strike": 215, "delta": 0.25, "mark": 2.5, "premPct": 1.25, "annPct": 22, "oi": 100},
                 {"targetDte": 30, "dte": 30, "strike": 220, "delta": 0.2, "mark": 3.0, "premPct": 1.5, "annPct": 18, "oi": 100}]},
