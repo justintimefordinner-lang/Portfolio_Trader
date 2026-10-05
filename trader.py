@@ -228,9 +228,10 @@ def run_once(force: bool = False, now: float | None = None, entries: bool | None
         except Exception as exc:  # noqa: BLE001 — one account's bad data must not silence the others
             _log(f"{label}: ERROR - {exc}")
             continue
-        for s in built:
+        for i, s in enumerate(built):
             s["key"] = f"{a['id']}|{s['key']}"
             s["account"] = label
+            s["seq"] = i  # position in build(): for new puts, the ranked queue order the page sorts by
             fresh.append(s)
     if waiting and slot and last_slot_of_day(slot[0]) and not in_entry_window(when + timedelta(seconds=INTERVAL)) and day.get("entriesDay") != today:
         # the day's last slot is closing and no slot was served: say so instead of staying silent

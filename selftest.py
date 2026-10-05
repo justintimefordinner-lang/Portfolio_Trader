@@ -182,6 +182,8 @@ def main() -> int:
     check("Run now: marker consumed, full pass", trader.run_requested() and not os.path.exists(os.path.join(data, "trader-run")) and json.load(open(os.path.join(data, "trade-suggestions.json")))["meta"]["lastPass"] == "run now")
     doc = json.load(open(os.path.join(data, "trade-suggestions.json")))
     check("file lists them as new with pushedAt", all(s["status"] == "new" and s.get("pushedAt") for s in doc["suggestions"]))
+    acc1_puts = sorted((s for s in doc["suggestions"] if s["kind"] == "csp" and s["key"].startswith("ACC1|")), key=lambda s: s["seq"])
+    check("each row carries its build position; ACC1's puts by seq are the ranked queue (FTNT first, MU last)", acc1_puts and acc1_puts[0]["symbol"] == "FTNT" and acc1_puts[-1]["symbol"] == "MU", str([(s["symbol"], s.get("seq")) for s in acc1_puts]))
     # the app marks one as done; the trader respects it and stops pushing it
     json.dump({klac["key"]: {"status": "done", "at": datetime.now().isoformat()}}, open(os.path.join(data, "trade-feedback.json"), "w"))
     sent_bodies.clear()
