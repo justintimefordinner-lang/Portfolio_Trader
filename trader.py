@@ -50,6 +50,8 @@ RUN_FILE = "trader-run"  # the app writes it; a pass runs within POLL seconds an
 SENT_FILE = os.path.join(STATE_DIR, "sent.json")
 DAY_FILE = os.path.join(STATE_DIR, "day.json")  # {"scanRequested": slot, "entriesBuilt": slot, "entriesDay": date}
 PAUSE_FILE = os.path.join(STATE_DIR, "paused")
+PASS_FILE = os.path.join(STATE_DIR, "passes.json")  # what each recent pass did, shown on the Trader page
+PASS_KEEP = 16
 INTERVAL = int(os.environ.get("TRADER_INTERVAL", "900"))
 POLL = 5  # seconds between looks for the run marker
 ENTRY_HOURS = [int(h) for h in (os.environ.get("TRADER_ENTRY_HOURS") or "11,12,13,14,15").split(",") if h.strip()]  # Eastern
@@ -317,6 +319,27 @@ def run_once(force: bool = False, now: float | None = None, entries: bool | None
             "entries": entries, "accounts": len(accts), **({"waiting": "scan"} if waiting else {})}
 
 
+def note_pass(kind: str, result: dict) -> None:
+    """Record what a pass did ("auto" or "run now") so the Trader page can show it.
+    Repeats of the same skip (market closed, overnight) collapse into one line."""
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    passes = _read(PASS_FILE, []) or []
+    row = {"at": stamp, "kind": kind, **{k: v for k, v in result.items() if k in ("skipped", "waiting", "entries", "pushed", "active", "paused", "error")}}
+    last = passes[-1] if passes else None
+    if last and row.get("skipped") and last.get("kind") == kind and last.get("skipped") == row["skipped"]:
+        last["at"] = stamp
+        last["count"] = int(last.get("count") or 1) + 1
+    else:
+        passes.append(row)
+    passes = passes[-PASS_KEEP:]
+    _write(PASS_FILE, passes)
+    out_path = os.path.join(DATA_DIR, OUT_FILE)
+    doc = _read(out_path, None)
+    if isinstance(doc, dict) and isinstance(doc.get("meta"), dict):
+        doc["meta"]["passes"] = passes
+        _write(out_path, doc)
+
+
 def run_requested() -> bool:
     """The app's "Run now": a full pass, whatever the clock says. Removes the marker first so a failing pass can't loop."""
     path = os.path.join(DATA_DIR, RUN_FILE)
@@ -328,6 +351,7 @@ def run_requested() -> bool:
         pass
     r = run_once(force=True, entries=True, requested=True)
     _log(f"run now: {r}")
+    note_pass("run now", r)
     return True
 
 
@@ -345,10 +369,16 @@ def main() -> None:
         try:
             if time.time() >= next_pass:
                 next_pass = time.time() + INTERVAL
-                _log(f"pass: {run_once()}")  # no forced pass at start-up: the clock decides, Run now overrides
+                r = run_once()  # no forced pass at start-up: the clock decides, Run now overrides
+                _log(f"pass: {r}")
+                note_pass("auto", r)
             run_requested()
         except Exception as exc:  # noqa: BLE001 — never let one bad pass stop the loop
             _log(f"ERROR - {exc}")
+            try:
+                note_pass("auto", {"error": str(exc)[:160]})
+            except Exception:  # noqa: BLE001
+                pass
         time.sleep(POLL)
 
 

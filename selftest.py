@@ -197,6 +197,13 @@ def main() -> int:
     trader.run_once(force=True, now=time.time() + 50 * 3600, entries=True, when=mkt)
     doc = json.load(open(os.path.join(data, "trade-suggestions.json")))
     check("gone from the scan -> expired, kept in the log", next(s for s in doc["suggestions"] if s["symbol"] == "FTNT" and s["kind"] == "csp")["status"] == "expired")
+    # the pass log the Trader page shows
+    trader.note_pass("auto", {"skipped": "market closed"})
+    trader.note_pass("auto", {"skipped": "market closed"})
+    trader.note_pass("auto", {"active": 3, "pushed": 1, "entries": False, "waiting": "scan", "accounts": 2})
+    trader.note_pass("run now", {"active": 3, "pushed": 0, "entries": True})
+    plog = json.load(open(os.path.join(data, "trade-suggestions.json")))["meta"].get("passes") or []
+    check("pass log: repeated skips collapse; waiting and run-now passes are recorded", [(p["kind"], p.get("skipped"), p.get("count"), p.get("waiting"), p.get("entries")) for p in plog[-3:]] == [("auto", "market closed", 2, None, None), ("auto", None, None, "scan", False), ("run now", None, None, None, True)], str(plog))
     open(os.path.join(work, "paused"), "w").close()
     sent_bodies.clear()
     trader.run_once(force=True, now=time.time() + 80 * 3600, entries=True, when=mkt)
