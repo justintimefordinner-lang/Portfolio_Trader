@@ -283,6 +283,66 @@ def _money(n: float) -> str:
     return f"${round(n):,}"
 
 
+def _px(p: dict) -> float:
+    """The price the scan judged this put at: mid, a quarter up from the bid, or the bid, by spread width."""
+    return float(p.get("fill", p["mark"]))
+
+
+def _basis(p: dict) -> str:
+    b = p.get("basis")
+    return "bid" if b == "bid" else "¼ up from the bid" if b == "quarter" else "mid"
+
+
+SWAP_EDGE = 1.0  # points of yield per 30 days a new put must beat the closed puts by
+
+
+def swap_plan(sym: str, p: dict, acct: dict, cap: dict, room: float, today: date) -> dict | None:
+    """The cheapest way to fund one contract of an out-of-reach pick: close the open
+    puts with the least left to earn on their collateral (winners only, lowest
+    remaining yield per 30 days first). Mirrors the dashboard's lib/quant-swap.ts.
+    None when the name is over its own per-name cap, where no swap helps."""
+    need = p["collateral"]
+    short_by = need - room
+    per_name = cap.get("maxPerTicker", R["maxPerTicker"]) + cap.get("tickerBand", R["tickerBand"])
+    if per_name * cap["buyingPower"] - committed(sym, acct) < need:
+        return None
+    cands = []
+    for o in acct["options"]:
+        if o.get("kind") != "csp" or o["side"] != "short" or o["symbol"] == sym or not o.get("entryPerShare"):
+            continue
+        dte = _dte(o["expiration"], today)
+        captured = (o["entryPerShare"] - o["mark"]) / o["entryPerShare"]
+        if dte <= 0 or captured <= 0:
+            continue  # winners only
+        y = (o["mark"] / o["strike"]) * (30 / max(1, dte)) * 100 if o["strike"] else 0.0
+        cands.append((y, -captured, o, dte, captured))
+    cands.sort(key=lambda c: (c[0], c[1]))
+    legs, freed, give, coll = [], 0.0, 0.0, 0.0
+    for y, _, o, dte, captured in cands:
+        if freed >= short_by:
+            break
+        per = (o["strike"] - o["mark"]) * MULT
+        if per <= 0:
+            continue
+        k = int(min(o["qty"], -(-(short_by - freed) // per)))
+        legs.append(f"{k} × {o['symbol']} ${o['strike']:g} ({round(captured * 100)}% captured, {dte}d, {y:.1f}%/30d left)")
+        freed += per * k
+        give += (y / 100) * o["strike"] * MULT * k
+        coll += o["strike"] * MULT * k
+    gain = (p["yield30"] / 100) * need
+    if not legs:
+        text = "No winning puts to close; it needs new cash or expiries."
+    elif freed < short_by:
+        text = f"Closing every winning put ({', '.join(legs)}) frees {_money(freed)}, still {_money(short_by - freed)} short."
+    else:
+        closed_y = (give / coll) * 100 if coll else 0.0
+        pays = p["yield30"] >= closed_y + SWAP_EDGE and gain > give
+        text = (f"To fund it: close {', '.join(legs)}; frees {_money(freed)}. Gives up about {_money(give)} per 30 days ({closed_y:.1f}%) "
+                f"for {_money(gain)} ({p['yield30']:.1f}%): " + ("pays, about +" + _money(gain - give) + " per 30 days." if pays else "doesn't pay at these prices.")
+                + " Information, not a rule: the backtest found swapping neutral.")
+    return {"shortBy": short_by, "text": text}
+
+
 def _replacement(o: dict, picks: list, acct: dict, cap: dict) -> dict | None:
     """What to sell with the collateral a closing put frees: the same name's pick
     when it still pays, otherwise the best-ranked name with room. Sized to the
@@ -297,7 +357,7 @@ def _replacement(o: dict, picks: list, acct: dict, cap: dict) -> dict | None:
             continue
         n = max(1, min(f["contracts"], int(freed // p["collateral"])))
         return {"symbol": row["sym"], "strike": p["strike"], "expiration": p["exp"], "dte": p["dte"], "qty": n,
-                "price": p["mark"], "yield30": p["yield30"], "delta": p["delta"], "collateral": p["collateral"] * n,
+                "price": _px(p), "yield30": p["yield30"], "delta": p["delta"], "collateral": p["collateral"] * n,
                 "score": rk["score"]}
     return None
 
@@ -395,17 +455,39 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
         out.append({
             "key": f"csp|{row['sym']}|{p['strike']}|{p['exp']}",
             "kind": "csp", "symbol": row["sym"], "strike": p["strike"], "expiration": p["exp"],
-            "qty": n, "price": p["mark"], "delta": p["delta"], "yield30": p["yield30"],
+            "qty": n, "price": _px(p), "delta": p["delta"], "yield30": p["yield30"],
             "title": f"Sell {n} × {row['sym']} ${p['strike']:g} put ({p['exp'][5:]}, {p['dte']}d)",
-            "detail": (f"{p['yield30']:.1f}% per 30 days at the {p['mark']:.2f} mid ({p['bid']:.2f}–{p['ask']:.2f}), {p['delta']:.2f}Δ, "
-                       f"{p['belowSpotPct']:.1f}% below ${row['price']:.2f}. {_money(p['collateral'] * n)} collateral, {_money(p['mark'] * MULT * n)} credit."
+            "detail": (f"{p['yield30']:.1f}% per 30 days at {_px(p):.2f}, the {_basis(p)} ({p['bid']:.2f}–{p['ask']:.2f}), {p['delta']:.2f}Δ, "
+                       f"{p['belowSpotPct']:.1f}% below ${row['price']:.2f}. {_money(p['collateral'] * n)} collateral, {_money(_px(p) * MULT * n)} credit."
                        + _rank_text(rk, p)
                        + (f" Earnings in {rk['earnings']}d — queued after names without a report." if rk["earnings"] is not None else "")
                        + (" Already held — this adds." if f["held"] else "")),
-            "amount": round(p["mark"] * MULT * n, 2),
+            "amount": round(_px(p) * MULT * n, 2),
             "rule": "4% target",
             "rank": rk["score"],
         })
+
+    # 2b. Out of reach: the best-ranked pick that pays the target but needs more than
+    #     the room left, with the cheapest way to fund it (the Quant scan's "Out of
+    #     reach" section). A note, not a trade: the backtest found swapping neutral.
+    room = max(0.0, min(cap["freeCash"] - spent, cap["buyingPower"] - committed_total(acct) - spent))
+    for _, row, p, rk in picks:
+        if alloc.get(row["sym"], 0) > 0 or rk["earnings"] is not None or p["collateral"] <= room:
+            continue
+        plan = swap_plan(row["sym"], p, acct, cap, room, today)
+        if plan is None:
+            continue  # over its own cap: no swap can help
+        out.append({
+            "key": f"note|reach|{row['sym']}|{p['strike']}|{p['exp']}",
+            "kind": "note", "symbol": row["sym"], "strike": p["strike"], "expiration": p["exp"],
+            "title": f"Out of reach: {row['sym']} ${p['strike']:g} put pays {p['yield30']:.1f}%, needs {_money(p['collateral'])}",
+            "detail": (f"Rank {round(rk['score'])}, {p['delta']:.2f}Δ, {p['exp'][5:]} ({p['dte']}d). One contract needs {_money(p['collateral'])}; "
+                       f"room is {_money(room)}, short by {_money(plan['shortBy'])}. " + plan["text"]),
+            "amount": round(p["collateral"], 2),
+            "rule": "out of reach",
+            "rank": rk["score"],
+        })
+        break  # one per account: the best-ranked
 
     # 3. Covered calls on 100+ shares with no call on.
     called = {o["symbol"] for o in acct["options"] if o["side"] == "short" and o["optionType"] == "call"}

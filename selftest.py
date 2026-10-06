@@ -67,7 +67,7 @@ def main() -> int:
         {"sym": f"X{i}", "price": 50, "pick": pick(45, 35, far, 2.0, 4.4, 0.30, 4_500), "best": None, "reason": "ok", "erDate": None, "erDays": None, "erInWindow": False}
         for i in range(6)
     ] + [  # the page's custom settings moved this pick; the trader must take the study's
-        {"sym": "STU", "price": 50, "pick": pick(48, 35, far, 2.5, 5.2, 0.45, 4_800), "study": pick(44, 35, far, 1.8, 4.1, 0.28, 4_400), "best": None, "reason": "ok", "erDate": None, "erDays": None, "erInWindow": False}
+        {"sym": "STU", "price": 50, "pick": pick(48, 35, far, 2.5, 5.2, 0.45, 4_800), "study": {**pick(44, 35, far, 1.8, 4.1, 0.28, 4_400), "fill": 1.7, "basis": "quarter"}, "best": None, "reason": "ok", "erDate": None, "erDays": None, "erInWindow": False}
     ]}
     json.dump(scan, open(os.path.join(data, "quant-scan.json"), "w"))
     json.dump({"board": [], "screened": [{"sym": "FTNT", "score": 50, "tier": "S", "vrpRatio": 1.3}, {"sym": "KLAC", "score": 90, "tier": "A", "vrpRatio": 1.0}]}, open(os.path.join(data, "am_report.json"), "w"))
@@ -103,6 +103,7 @@ def main() -> int:
     check("rank: unknown IV/RV counts as the middle", suggest.rank(base, None)["vrp"] == 0.5)
     stu = next((s for s in csps if s["symbol"] == "STU"), None)
     check("the trader takes the study's pick, not the page's custom one", stu is not None and stu["strike"] == 44, str(stu and (stu["strike"], stu["qty"])))
+    check("the suggestion prices at the scan's assumed fill and names the band", stu is not None and stu["price"] == 1.7 and "at 1.70, the ¼ up from the bid (1.75–1.85)" in stu["detail"] and stu["amount"] == round(1.7 * 100 * stu["qty"], 2), str(stu and (stu["price"], stu["amount"], stu["detail"][:80])))
     hood_close = next(s for s in sug if s["kind"] == "close" and s["symbol"] == "HOOD")
     rep = hood_close.get("replacement")
     check("a close is paired with the best-ranked replacement, sized to the freed collateral", rep is not None and rep["symbol"] == "FTNT" and rep["qty"] == 1 and "Replace with: sell 1 × FTNT $170 put" in hood_close["detail"], str(rep))
@@ -112,6 +113,8 @@ def main() -> int:
     check("the detail explains the rank", "Rank 70 (spread 2% of mid, 0.30Δ to reach the target, IV/RV 1.30)" in ftnt["detail"] and ftnt["rank"] == 70.0, ftnt["detail"])
     tight = {s["symbol"]: s["qty"] for s in suggest.build(suggest.load_context(data), None, today=date.today(), cap={**cap, "freeCash": 20_000}) if s["kind"] == "csp"}
     check("$20k: room for one put — the best-ranked name (FTNT) gets it", tight == {"FTNT": 1}, str(tight))
+    reach = [s for s in suggest.build(suggest.load_context(data), None, today=date.today(), cap={**cap, "freeCash": 20_000}) if s["rule"] == "out of reach"]
+    check("$20k: one out-of-reach note, the best-ranked name that didn't fit (STU), funded by closing the HOOD winner", len(reach) == 1 and reach[0]["symbol"] == "STU" and "close 1 × HOOD $90" in reach[0]["detail"] and "pays, about +" in reach[0]["detail"], str([(s["symbol"], s["detail"][:160]) for s in reach]))
     rr = {s["symbol"]: s["qty"] for s in suggest.build(suggest.load_context(data), None, today=date.today(), cap={**cap, "freeCash": 60_000}) if s["kind"] == "csp"}
     check("$60k: FTNT (rank 70) takes two in its round, then one each down the queue", rr == {"FTNT": 2, "STU": 1, "X0": 1, "X1": 1, "X2": 1, "X3": 1}, str(rr))
     closes_only = suggest.build(suggest.load_context(data), None, today=date.today(), entries=False)
