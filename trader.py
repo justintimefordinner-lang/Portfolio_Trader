@@ -8,14 +8,18 @@ named, and writes data/trade-suggestions.json for the dashboard's Trader page.
 It never places an order; there is no broker client in here.
 
 Timing (the backtest traded once a day at 11:00 ET; the user wants it hourly):
+  * passes run on the clock, at whole multiples of TRADER_INTERVAL (900 s =
+    :00, :15, :30, :45), not counted from start-up, so a slot is seen the
+    moment it opens;
   * closes at 50% are checked on every pass, all session, every account;
   * new puts, covered calls and notes are built once per entry slot: the top of
     each hour in TRADER_ENTRY_HOURS (default 11,12,13,14,15 ET = 9:00 to 1:00
     Mountain), with TRADER_ENTRY_SLOT_MINUTES after the hour to get it done. At
     the first pass of a slot the trader asks the bridge for a fresh Quant scan
     (task_inbox/quant_scan) and waits for one no older than TRADER_SCAN_MAX_AGE
-    seconds before the slot opened. If a day ends with no slot served, a note
-    says so.
+    seconds before the slot opened. While it waits it looks for that scan every
+    POLL seconds and runs the pass as soon as it lands, not at the next tick.
+    If a day ends with no slot served, a note says so.
   * the dashboard's "Run now" drops data/trader-run: a full pass, any time, any
     day, against whatever scan is on disk.
 
@@ -149,6 +153,20 @@ def scan_fresh(scan: dict | None, slot_start: datetime) -> bool:
     if t.tzinfo is None:
         t = t.replace(tzinfo=timezone.utc)
     return t >= slot_start - timedelta(seconds=SCAN_MAX_AGE)
+
+
+def next_pass_at(now: float) -> float:
+    """The next pass time on the clock: the next whole multiple of INTERVAL (900 s = :00, :15, :30, :45)."""
+    return (int(now) // INTERVAL + 1) * INTERVAL
+
+
+def scan_landed(when: datetime | None = None) -> bool:
+    """True when the open slot hasn't had its entries yet and a scan fresh enough for it is on disk."""
+    when = when or datetime.now(timezone.utc)
+    slot = current_slot(when)
+    if not slot or not active(when) or (_read(DAY_FILE, {}) or {}).get("entriesBuilt") == slot[0]:
+        return False
+    return scan_fresh(_read(os.path.join(DATA_DIR, "quant-scan.json"), None), slot[1])
 
 
 def request_scan(slot_key: str) -> bool:
@@ -364,14 +382,19 @@ def main() -> None:
     _log(f"trader started — closes every {INTERVAL}s from {min(ENTRY_HOURS):02d}:00 ET to the close, entries at {hours} ET, every account; ntfy "
          + (f"{cfg['url']}/{cfg['topic'][:4]}…" if cfg["topic"] else "OFF (set NTFY_TOPIC)")
          + ("" if os.path.isdir(INBOX_DIR) else "; bridge inbox not mounted, relying on its scheduled scan"))
-    next_pass = 0.0
+    next_pass = 0.0  # a pass at start-up (the clock still decides what it does), then on the clock
+    waiting = False
     while True:
         try:
-            if time.time() >= next_pass:
-                next_pass = time.time() + INTERVAL
-                r = run_once()  # no forced pass at start-up: the clock decides, Run now overrides
+            early = waiting and scan_landed()
+            if time.time() >= next_pass or early:
+                if early:
+                    _log("fresh Quant scan landed — running the slot's pass now")
+                next_pass = next_pass_at(time.time())
+                r = run_once()  # never forced: the clock decides, Run now overrides
                 _log(f"pass: {r}")
                 note_pass("auto", r)
+                waiting = r.get("waiting") == "scan"
             run_requested()
         except Exception as exc:  # noqa: BLE001 — never let one bad pass stop the loop
             _log(f"ERROR - {exc}")

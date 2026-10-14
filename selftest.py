@@ -170,10 +170,13 @@ def main() -> int:
     inwin = datetime(2026, 10, 1, 15, 30, tzinfo=timezone.utc)
     r2c = trader.run_once(force=True, now=time.time() + 180, when=inwin)
     check("in a slot with a stale scan: waiting, scan requested", r2c.get("waiting") == "scan" and os.path.exists(os.path.join(trader.INBOX_DIR, "quant_scan")), str(r2c))
+    check("while waiting, a stale scan has not landed", not trader.scan_landed(inwin))
     scan["meta"]["asOf"] = "2026-10-01T15:05:00+00:00"
     json.dump(scan, open(os.path.join(data, "quant-scan.json"), "w"))
+    check("the requested scan lands: the waiting loop sees it before the next tick", trader.scan_landed(inwin))
     r2d = trader.run_once(force=True, now=time.time() + 240, when=inwin)
     check("in a slot with a fresh scan: entries built", r2d["entries"] is True, str(r2d))
+    check("once the slot is served, the scan no longer counts as landed", not trader.scan_landed(inwin))
     r2e = trader.run_once(force=True, now=time.time() + 300, when=datetime(2026, 10, 1, 15, 40, tzinfo=timezone.utc))
     check("later in the same slot: closes only (a slot is served once)", r2e["entries"] is False and not r2e.get("waiting"), str(r2e))
     r2f = trader.run_once(force=True, now=time.time() + 360, when=datetime(2026, 10, 1, 16, 5, tzinfo=timezone.utc))
@@ -278,6 +281,8 @@ def main() -> int:
     check("active: 11:00 ET on", trader.active(datetime(2026, 10, 1, 15, 0, tzinfo=utc)) and trader.active(datetime(2026, 10, 1, 19, 45, tzinfo=utc)))
     check("active: not after the close", not trader.active(datetime(2026, 10, 1, 20, 5, tzinfo=utc)))
     check("an unforced pass at 10:30 ET is skipped", trader.run_once(when=datetime(2026, 10, 1, 14, 30, tzinfo=utc)).get("skipped", "").startswith("before 11:00"))
+    tick = lambda *a: datetime.fromtimestamp(trader.next_pass_at(datetime(*a, tzinfo=utc).timestamp()), utc).strftime("%H:%M:%S")
+    check("passes run on the clock: 15:12:30 UTC -> 15:15, 15:59:59 -> 16:00, 15:00:00 -> 15:15", tick(2026, 10, 1, 15, 12, 30) == "15:15:00" and tick(2026, 10, 1, 15, 59, 59) == "16:00:00" and tick(2026, 10, 1, 15, 0, 0) == "15:15:00")
     slot = lambda *a: (trader.current_slot(datetime(*a, tzinfo=utc)) or (None,))[0]
     check("slot: 11:30 EDT is the 11:00 slot", slot(2026, 10, 1, 15, 30) == "2026-10-01T11")
     check("slot: 10:30 EDT is none", slot(2026, 10, 1, 14, 30) is None)
