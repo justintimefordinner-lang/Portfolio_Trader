@@ -20,7 +20,7 @@ The rules (the wheel study's combo 87 with 0.75-delta LEAPS):
     strike still paying 0.5% of basis a week (from the bridge's ladder)
   * on 100+ shares with no long call: a note to buy a ~0.75Δ ~450-day LEAPS
   * notes: a name over its cap, collateral beyond cash and the VIX allowance
-  * the portfolio hedge (H below): QQQ puts bought at highs, sold at 2.5x or 60 days out
+  * the portfolio hedge (H below): SMH puts bought at highs, sold at 2.5x or 60 days out
 """
 from __future__ import annotations
 
@@ -50,13 +50,13 @@ RANK = {
 }
 
 
-# The portfolio hedge (backtested 2026-10-14, run 125): QQQ puts ~10% below spot,
-# 6-12 months out, notional half of committed capital, bought when the account is
+# The portfolio hedge (backtested 2026-10-14, runs 125 and 133): SMH puts ~10% below spot,
+# 6-12 months out (SMH tracks a chip-heavy book; QQQ did less), notional half of committed, bought when the account is
 # at (within 5% of) its high with the VIX under 20 and at least a quarter invested;
 # held; the lot is sold at 2.5x its cost or inside 60 days of expiry; nothing is
 # rebought until the next high. Over 2022-2026 it lifted the return 46.9% -> 47.3%
-# a year, cut the worst drawdown 35.8% -> 33.0% and halved the 2022 loss. Env
-# overrides: TRADER_HEDGE=0 turns it off; HEDGE_FRAC/OTM/TP/VIX_MAX/MIN_INVESTED/
+# a year, cut the worst drawdown 35.8% -> 31.1% and took the 2022 loss from 9.4% to 2.7%. Env
+# overrides: TRADER_HEDGE=0 turns it off; HEDGE_SYM (QQQ for a broader book), HEDGE_FRAC/OTM/TP/VIX_MAX/MIN_INVESTED/
 # BAND/DTE_LO/DTE_HI/CLOSE_DTE tune it.
 def _envf(name: str, default: float) -> float:
     try:
@@ -67,7 +67,7 @@ def _envf(name: str, default: float) -> float:
 
 H = {
     "on": (os.environ.get("TRADER_HEDGE", "1") or "").strip().lower() not in ("0", "false", "no", "off", ""),
-    "sym": "QQQ", "frac": _envf("HEDGE_FRAC", 0.5), "otm": _envf("HEDGE_OTM", 0.10), "tp": _envf("HEDGE_TP", 2.5),
+    "sym": (os.environ.get("HEDGE_SYM") or "SMH").strip().upper(), "frac": _envf("HEDGE_FRAC", 0.5), "otm": _envf("HEDGE_OTM", 0.10), "tp": _envf("HEDGE_TP", 2.5),
     "vixMax": _envf("HEDGE_VIX_MAX", 20.0), "minInvested": _envf("HEDGE_MIN_INVESTED", 0.25), "band": _envf("HEDGE_BAND", 0.05),
     "dteLo": int(_envf("HEDGE_DTE_LO", 180)), "dteHi": int(_envf("HEDGE_DTE_HI", 365)), "closeDte": int(_envf("HEDGE_CLOSE_DTE", 60)),
 }
@@ -387,8 +387,9 @@ def _replacement(o: dict, picks: list, acct: dict, cap: dict) -> dict | None:
 
 
 def hedge_lots(acct: dict) -> list[dict]:
-    """The account's hedge: long puts on the hedge symbol."""
-    return [o for o in acct["options"] if o["symbol"] == H["sym"] and o["optionType"] == "put" and o["side"] == "long"]
+    """The account's hedge: standalone long puts on the hedge symbol (a spread's long leg is not a hedge)."""
+    return [o for o in acct["options"] if o["symbol"] == H["sym"] and o["optionType"] == "put" and o["side"] == "long"
+            and (o.get("kind") or "other") in ("leap-put-hedge", "other")]
 
 
 def hedge_high(ctx: dict, acct_id: str, tpv: float) -> float:

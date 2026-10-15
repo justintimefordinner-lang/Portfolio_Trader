@@ -274,7 +274,7 @@ def main() -> int:
     hy = (date.today() + timedelta(days=200)).isoformat()
     hz = (date.today() + timedelta(days=400)).isoformat()
     hput = lambda exp, dte, strike, ask: {"exp": exp, "dte": dte, "strike": strike, "bid": ask - 1, "ask": ask, "mark": ask - 0.5, "delta": -0.2, "oi": 1000, "belowSpotPct": round((1 - strike / 600) * 100, 1)}
-    hedge_chain = {"sym": "QQQ", "price": 600.0, "puts": [hput(hy, 200, 545, 15.0), hput(hx, 270, 540, 21.0), hput(hx, 270, 520, 14.0), hput(hz, 400, 540, 30.0)]}
+    hedge_chain = {"sym": "SMH", "price": 600.0, "puts": [hput(hy, 200, 545, 15.0), hput(hx, 270, 540, 21.0), hput(hx, 270, 520, 14.0), hput(hz, 400, 540, 30.0)]}
     hacct = lambda tpv, opts=(): {"summary": {"totalValue": tpv, "equityValue": 900_000, "cryptoValue": 0, "cash": 0}, "valueHistory": [],
                                   "equities": [{"symbol": "NVDA", "qty": 5000, "avgCost": 150, "price": 180}],
                                   "options": [{"id": "h1", "kind": "csp", "symbol": "MU", "optionType": "put", "side": "short", "qty": 10, "strike": 100, "expiration": far, "entryPerShare": 4.0, "mark": 3.5, "delta": -0.3, "theta": 0, "iv": 0.5, "breakeven": 96}] + list(opts)}
@@ -283,7 +283,7 @@ def main() -> int:
     ctx1 = hctx(2_000_000)
     h = [s for s in suggest.build(ctx1, "HED", today=date.today(), entries=True) if s["kind"] == "hedge"]
     # committed: $900k of shares + $100k of collateral = $1.0M; half = $500k; / (600 x 100) = 8 contracts
-    check("at a new high, VIX 16, 50% invested: buy 8 x QQQ 540 put ~270d (10% OTM, nearest the 180-365 midpoint)", len(h) == 1 and h[0]["qty"] == 8 and h[0]["strike"] == 540 and h[0]["expiration"] == hx and h[0]["price"] == 21.0 and h[0]["amount"] == 16_800, str(h))
+    check("at a new high, VIX 16, 50% invested: buy 8 x SMH 540 put ~270d (10% OTM, nearest the 180-365 midpoint)", len(h) == 1 and h[0]["qty"] == 8 and h[0]["strike"] == 540 and h[0]["expiration"] == hx and h[0]["price"] == 21.0 and h[0]["amount"] == 16_800, str(h))
     check("the high-water mark is recorded", ctx1["hwm"]["HED"]["high"] == 2_000_000, str(ctx1.get("hwm")))
     ctx2 = {**hctx(1_850_000), "hwm": {"HED": {"high": 2_000_000}}}
     check("7.5% under the high: no hedge, and the mark stands", not [s for s in suggest.build(ctx2, "HED", today=date.today(), entries=True) if s["kind"] == "hedge"] and ctx2["hwm"]["HED"]["high"] == 2_000_000)
@@ -291,7 +291,7 @@ def main() -> int:
     check("2.5% under the high: near enough to hedge", any(s["kind"] == "hedge" for s in suggest.build(ctx3, "HED", today=date.today(), entries=True)))
     check("VIX 22: no hedge", not [s for s in suggest.build(hctx(2_000_000, vix=22.0), "HED", today=date.today(), entries=True) if s["kind"] == "hedge"])
     check("outside the entry window: no hedge buy", not [s for s in suggest.build(hctx(2_000_000), "HED", today=date.today(), entries=False) if s["kind"] == "hedge"])
-    lot = lambda mark, exp, qty=4: {"id": "hl", "kind": "other", "symbol": "QQQ", "optionType": "put", "side": "long", "qty": qty, "strike": 540, "expiration": exp, "entryPerShare": 20.0, "mark": mark, "delta": -0.2, "theta": 0, "iv": 0.2, "breakeven": 520, "underlyingPrice": 600}
+    lot = lambda mark, exp, qty=4: {"id": "hl", "kind": "other", "symbol": "SMH", "optionType": "put", "side": "long", "qty": qty, "strike": 540, "expiration": exp, "entryPerShare": 20.0, "mark": mark, "delta": -0.2, "theta": 0, "iv": 0.2, "breakeven": 520, "underlyingPrice": 600}
     h4 = [s for s in suggest.build(hctx(2_000_000, opts=[lot(22.0, hx)]), "HED", today=date.today(), entries=True) if s["kind"].startswith("hedge")]
     check("4 contracts already on: top up to the half with 4 more, no exit yet", [(s["kind"], s["qty"]) for s in h4] == [("hedge", 4)], str(h4))
     h5 = [s for s in suggest.build(hctx(2_000_000, opts=[lot(52.0, hx)]), "HED", today=date.today(), entries=False) if s["kind"] == "hedge-close"]
@@ -312,11 +312,11 @@ def main() -> int:
     json.dump(pview, open(os.path.join(data, "manual", "snapshot.json"), "w"))
     paper.run(suggest.load_context(data), data, entries=True, today=pday, vix=16.3)
     pacct = next(a for a in json.load(open(os.path.join(data, "manual_positions.json")))["accounts"] if a["id"] == paper.PAPER_ID)
-    hl = next((p for p in pacct["positions"] if p["type"] == "option" and p["side"] == "long" and p["symbol"] == "QQQ"), None)
-    check("paper: 2 x QQQ 540 put bought for the hedge ($300k committed, half = $150k = 2 contracts)", hl is not None and hl["qty"] == 2 and hl["premium"] == 21.0, str(hl))
+    hl = next((p for p in pacct["positions"] if p["type"] == "option" and p["side"] == "long" and p["symbol"] == "SMH"), None)
+    check("paper: 2 x SMH 540 put bought for the hedge ($300k committed, half = $150k = 2 contracts)", hl is not None and hl["qty"] == 2 and hl["premium"] == 21.0, str(hl))
     plog = json.load(open(os.path.join(data, "trader-paper.json")))
     check("paper: the purchase is logged at -$4,200", any(t["kind"] == "hedge" and t["amount"] == -4200 for t in plog["trades"]), str([t for t in plog["trades"] if t["kind"] == "hedge"]))
-    pview["data"][paper.PAPER_ID]["options"].append({"id": f"{paper.PAPER_ID}:{hl['id']}", "kind": "other", "symbol": "QQQ", "optionType": "put", "side": "long", "qty": 2, "strike": 540, "expiration": hx, "entryPerShare": 21.0, "mark": 60.0, "delta": -0.6, "theta": 0, "iv": 0.3, "breakeven": 519, "underlyingPrice": 520})
+    pview["data"][paper.PAPER_ID]["options"].append({"id": f"{paper.PAPER_ID}:{hl['id']}", "kind": "other", "symbol": "SMH", "optionType": "put", "side": "long", "qty": 2, "strike": 540, "expiration": hx, "entryPerShare": 21.0, "mark": 60.0, "delta": -0.6, "theta": 0, "iv": 0.3, "breakeven": 519, "underlyingPrice": 520})
     json.dump(pview, open(os.path.join(data, "manual", "snapshot.json"), "w"))
     cash_h = pacct["cash"]
     paper.run(suggest.load_context(data), data, entries=False, today=pday, vix=16.3)
@@ -325,7 +325,7 @@ def main() -> int:
     check("paper: sold at 2.9x, +$7,800 booked to leaps-closed.json, cash up by the proceeds", not any(p.get("id") == hl["id"] for p in pacct["positions"]) and abs(pacct["cash"] - (cash_h + 12_000)) < 1 and len(lrec) == 1 and lrec[0]["realizedPnl"] == 7800 and lrec[0]["optionType"] == "put", f"{pacct['cash']:.0f} vs {cash_h + 12_000:.0f}; {lrec}")
     hlines = paper.undo(data, (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(timespec="seconds"))
     pacct = next(a for a in json.load(open(os.path.join(data, "manual_positions.json")))["accounts"] if a["id"] == paper.PAPER_ID)
-    check("paper: undo reverses the hedge sale and purchase", not any(p.get("symbol") == "QQQ" for p in pacct["positions"]) and sum(1 for l in hlines if l.startswith("undid") and "hedge" in l) == 2, str(hlines))
+    check("paper: undo reverses the hedge sale and purchase", not any(p.get("symbol") == "SMH" for p in pacct["positions"]) and sum(1 for l in hlines if l.startswith("undid") and "hedge" in l) == 2, str(hlines))
 
     print("notifications")
     check("ASCII header passes through", notify.header("Trading · Sell 2 x KLAC") == "Trading · Sell 2 x KLAC" or notify.header("Trading - Sell 2 x KLAC") == "Trading - Sell 2 x KLAC")
