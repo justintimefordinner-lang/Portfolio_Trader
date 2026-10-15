@@ -65,7 +65,8 @@ ACCOUNTS = [a.strip() for a in (os.environ.get("TRADER_ACCOUNTS") or "").split("
 RESEND_AFTER_SEC = 24 * 3600
 RESEND_MOVE_PCT = 15.0
 KEEP = 300  # suggestions kept in the file
-ENTRY_KINDS = ("csp", "cc", "note")
+ENTRY_KINDS = ("csp", "cc", "hedge", "note")
+HWM_FILE = os.path.join(STATE_DIR, "hwm.json")  # {account id: {"high": dollars, "at": iso}}: the hedge rule's high-water marks
 
 socket.setdefaulttimeout(30)
 
@@ -223,6 +224,7 @@ def run_once(force: bool = False, now: float | None = None, entries: bool | None
     if not force and not active(when):
         return {"skipped": "market closed" if not market_open(when) else f"before {min(ENTRY_HOURS):02d}:00 ET"}
     ctx = suggest.load_context(DATA_DIR)
+    ctx["hwm"] = _read(HWM_FILE, {}) or {}  # the hedge rule's high-water marks; written back after the pass
     today = to_et(when).date().isoformat()
     day = _read(DAY_FILE, {}) or {}
     slot = current_slot(when)
@@ -262,7 +264,7 @@ def run_once(force: bool = False, now: float | None = None, entries: bool | None
     if entries:
         day = {**day, "entriesBuilt": slot[0] if slot else f"{today}Trun", "entriesDay": today}
         _write(DAY_FILE, day)
-    evaluated = set(ENTRY_KINDS) | {"close"} if entries else {"close"}
+    evaluated = set(ENTRY_KINDS) | {"close", "hedge-close"} if entries else {"close", "hedge-close"}
 
     # The Auto Trader paper account: same rules, booked as trades, on the same slots.
     paper_meta = None
@@ -273,6 +275,7 @@ def run_once(force: bool = False, now: float | None = None, entries: bool | None
                                    market_open=active(when))  # a Run now at 3 a.m. (or 10 a.m.) suggests; it does not fill
         except Exception as exc:  # noqa: BLE001 — the paper book must never block the live suggestions
             _log(f"paper: ERROR - {exc}")
+    _write(HWM_FILE, ctx.get("hwm") or {})
 
     out_path = os.path.join(DATA_DIR, OUT_FILE)
     existing = {s["key"]: s for s in (_read(out_path, {}) or {}).get("suggestions", [])}
@@ -379,7 +382,8 @@ def main() -> None:
     load_dotenv()
     cfg = notify.config()
     hours = ", ".join(f"{h:02d}:00" for h in ENTRY_HOURS) or "none"
-    _log(f"trader started — closes every {INTERVAL}s from {min(ENTRY_HOURS):02d}:00 ET to the close, entries at {hours} ET, every account; ntfy "
+    _log(f"trader started — closes every {INTERVAL}s from {min(ENTRY_HOURS):02d}:00 ET to the close, entries at {hours} ET, every account; "
+         + (f"hedge {suggest.H['sym']} {suggest.H['frac']:.0%} at highs, out at {suggest.H['tp']:g}x; " if suggest.H["on"] else "hedge off; ") + "ntfy "
          + (f"{cfg['url']}/{cfg['topic'][:4]}…" if cfg["topic"] else "OFF (set NTFY_TOPIC)")
          + ("" if os.path.isdir(INBOX_DIR) else "; bridge inbox not mounted, relying on its scheduled scan"))
     next_pass = 0.0  # a pass at start-up (the clock still decides what it does), then on the clock

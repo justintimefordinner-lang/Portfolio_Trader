@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import os
 
-PRIORITY = {"close": "high", "csp": "default", "cc": "default", "note": "low"}
-TAGS = {"close": "white_check_mark", "csp": "moneybag", "cc": "phone", "note": "warning"}
+PRIORITY = {"close": "high", "csp": "default", "cc": "default", "hedge": "default", "hedge-close": "high", "note": "low"}
+TAGS = {"close": "white_check_mark", "csp": "moneybag", "cc": "phone", "hedge": "shield", "hedge-close": "white_check_mark", "note": "warning"}
 
 
 def config() -> dict:

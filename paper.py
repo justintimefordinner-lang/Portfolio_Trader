@@ -189,6 +189,21 @@ def _closed_call(data_dir: str, o: dict, close_price: float, closed_at: str, out
     return rec
 
 
+def _closed_long(data_dir: str, o: dict, close_price: float, closed_at: str, outcome: str) -> dict:
+    """A long option round-trip -> leaps-closed.json (the dashboard's file for any long option)."""
+    cost = o["premium"] * MULT * o["qty"]
+    proceeds = close_price * MULT * o["qty"]
+    days = _days(o.get("openedAt"), closed_at)
+    realized = proceeds - cost
+    ret = realized / cost if cost else 0.0
+    rec = {"id": f"manual:{o['id']}", "symbol": o["symbol"], "name": f"{o['symbol']} · {LABEL}", "accountId": PAPER_ID,
+           "optionType": o["optionType"], "strike": o["strike"], "expiration": o["expiration"], "openedAt": o.get("openedAt") or closed_at, "closedAt": closed_at,
+           "contracts": o["qty"], "entryPerShare": _r2(o["premium"]), "costBasis": _r2(cost), "proceeds": _r2(proceeds),
+           "realizedPnl": _r2(realized), "outcome": outcome, "daysHeld": days, "returnPct": _r4(ret), "annualized": _r4(ret * 365 / days)}
+    _append_closed(data_dir, "leaps-closed.json", rec)
+    return rec
+
+
 def _closed_stock(data_dir: str, s: dict, shares: int, price: float, closed_at: str) -> dict:
     cost = s["avgCost"] * shares
     proceeds = price * shares
@@ -267,8 +282,16 @@ def settle_expired(data_dir: str, acct: dict, snap_acct: dict | None, today: dat
                 acct["cash"] += p["premium"] * MULT * p["qty"]
                 _closed_call(data_dir, p, 0.0, exp, "expired")
                 out.append(_entry("expired", f"{p['symbol']} ${p['strike']:g} call expired worthless at {px:.2f}: +{p['premium'] * MULT * p['qty']:,.0f}", p["premium"] * MULT * p["qty"], when, symbol=p["symbol"]))
+        elif p["side"] == "long":
+            # A long option past expiry: worth its intrinsic value, else nothing (the hedge
+            # rule closes 60 days out, so this is a backstop for a lot the view never priced).
+            intrinsic = max(0.0, (p["strike"] - px) if p["optionType"] == "put" else (px - p["strike"]))
+            proceeds = intrinsic * MULT * p["qty"]
+            acct["cash"] += proceeds
+            _closed_long(data_dir, p, intrinsic, exp, "expired" if proceeds <= 0 else ("closed_profit" if proceeds >= p["premium"] * MULT * p["qty"] else "closed_loss"))
+            out.append(_entry("expired", f"{p['symbol']} ${p['strike']:g} {p['optionType']} (long) expired at {px:.2f}: {'+' if proceeds else ''}{proceeds:,.0f}", proceeds - p["premium"] * MULT * p["qty"], when, symbol=p["symbol"]))
         else:
-            keep.append(p)  # a long option: not something the rules open; leave it to the Settings page
+            keep.append(p)  # anything else: leave it to the Settings page
     acct["positions"] = [p for p in keep if not (p.get("type") == "stock" and p.get("qty", 0) <= 0)]
     return out
 
@@ -276,6 +299,14 @@ def settle_expired(data_dir: str, acct: dict, snap_acct: dict | None, today: dat
 def _find_put(acct: dict, s: dict) -> dict | None:
     for p in acct["positions"]:
         if p.get("type") == "option" and p["side"] == "short" and p["optionType"] == "put" and p["symbol"] == s["symbol"] \
+                and abs(float(p["strike"]) - float(s["strike"])) < 1e-6 and p["expiration"] == s["expiration"]:
+            return p
+    return None
+
+
+def _find_long_put(acct: dict, s: dict) -> dict | None:
+    for p in acct["positions"]:
+        if p.get("type") == "option" and p["side"] == "long" and p["optionType"] == "put" and p["symbol"] == s["symbol"] \
                 and abs(float(p["strike"]) - float(s["strike"])) < 1e-6 and p["expiration"] == s["expiration"]:
             return p
     return None
@@ -316,6 +347,28 @@ def apply(data_dir: str, acct: dict, suggestions: list[dict], today: date, when:
             acct["positions"].append({"id": _new_id(), "type": "option", "symbol": s["symbol"], "optionType": "call", "side": "short",
                                       "qty": s["qty"], "strike": s["strike"], "expiration": exp, "premium": s["price"], "openedAt": today.isoformat()})
             out.append(_entry("cc", f"Sold {s['qty']} × {s['symbol']} ${s['strike']:g} call ({exp}) at {s['price']:.2f}", s["price"] * MULT * s["qty"], when, symbol=s["symbol"], rule=s.get("rule")))
+        elif k == "hedge":
+            if "hedge" in traded_today or _find_long_put(acct, s):
+                continue  # one hedge purchase a day; or the lot is already on (the bridge's view lagged a pass)
+            cost = float(s["price"]) * MULT * s["qty"]
+            if cost > acct["cash"] + credits(acct):
+                continue
+            traded_today.add("hedge")
+            acct["positions"].append({"id": _new_id(), "type": "option", "symbol": s["symbol"], "optionType": "put", "side": "long",
+                                      "qty": s["qty"], "strike": s["strike"], "expiration": s["expiration"], "premium": float(s["price"]), "openedAt": today.isoformat()})
+            acct["cash"] -= cost
+            out.append(_entry("hedge", f"Bought {s['qty']} × {s['symbol']} ${s['strike']:g} put ({s['expiration']}) at {s['price']:.2f} — hedge", -cost, when, symbol=s["symbol"], rule=s.get("rule")))
+        elif k == "hedge-close":
+            p = _find_long_put(acct, s)
+            if not p:
+                continue
+            price = float(s["price"])
+            proceeds = price * MULT * p["qty"]
+            realized = proceeds - p["premium"] * MULT * p["qty"]
+            acct["cash"] += proceeds
+            _closed_long(data_dir, p, price, today.isoformat(), "closed_profit" if realized >= 0 else "closed_loss")
+            acct["positions"] = [x for x in acct["positions"] if x is not p]
+            out.append(_entry("hedge-close", f"Sold {p['qty']} × {p['symbol']} ${p['strike']:g} put at {price:.2f} — hedge: {'+' if realized >= 0 else '−'}{abs(realized):,.0f}", realized, when, symbol=p["symbol"], rule=s.get("rule")))
     return out
 
 
@@ -340,7 +393,9 @@ def run(ctx: dict, data_dir: str, entries: bool, today: date, vix: float | None,
     cap = capacity(acct, snap_acct, vix, suggest.sizing(ctx, PAPER_ID))
     sug = suggest.build(ctx_paper, PAPER_ID, today=today, entries=entries, cap=cap)
     traded_today = {t.get("symbol") for t in trades if t.get("kind") == "csp" and str(t.get("at", ""))[:10] == today.isoformat()}
-    trades += apply(data_dir, acct, [s for s in sug if s["kind"] in ("csp", "close", "cc")], today, when, traded_today)
+    if any(t.get("kind") == "hedge" and str(t.get("at", ""))[:10] == today.isoformat() for t in trades):
+        traded_today.add("hedge")
+    trades += apply(data_dir, acct, [s for s in sug if s["kind"] in ("csp", "close", "cc", "hedge", "hedge-close")], today, when, traded_today)
     save_account(data_dir, acct)
 
     opts = [p for p in acct["positions"] if p.get("type") == "option"]
@@ -398,6 +453,31 @@ def undo(data_dir: str, since: str, until: str | None = None) -> list[str]:
             acct["positions"].append({"id": rec["id"].split(":", 1)[1] if ":" in rec["id"] else _new_id(), "type": "option", "symbol": sym, "optionType": "put", "side": "short",
                                       "qty": rec["contracts"], "strike": rec["strike"], "expiration": rec["expiration"], "premium": rec["creditPerShare"], "openedAt": rec.get("openedAt")})
             acct["cash"] -= rec["collateral"] + rec["realizedPnl"]
+            out.append(f"undid {text}")
+        elif kind == "hedge":
+            rows = [p for p in acct["positions"] if p.get("type") == "option" and p["side"] == "long" and p["optionType"] == "put" and p["symbol"] == sym]
+            row = max(rows, key=lambda p: p.get("openedAt") or "") if rows else None
+            if not row:
+                out.append(f"skip  {text} (position no longer on the book)")
+                keep_ids.add(id(t))
+                continue
+            acct["positions"] = [p for p in acct["positions"] if p is not row]
+            acct["cash"] += row["premium"] * MULT * row["qty"]
+            out.append(f"undid {text}")
+        elif kind == "hedge-close":
+            path = os.path.join(data_dir, MANUAL_DIR, "leaps-closed.json")
+            doc = _read(path, None) or {"closed": []}
+            recs = [r for r in doc.get("closed", []) if r.get("symbol") == sym and r.get("accountId") == PAPER_ID and r.get("outcome") in ("closed_profit", "closed_loss")]
+            rec = max(recs, key=lambda r: r.get("closedAt") or "") if recs else None
+            if not rec:
+                out.append(f"skip  {text} (closed record not found)")
+                keep_ids.add(id(t))
+                continue
+            doc["closed"] = [r for r in doc["closed"] if r is not rec]
+            _write(path, doc)
+            acct["positions"].append({"id": rec["id"].split(":", 1)[1] if ":" in rec["id"] else _new_id(), "type": "option", "symbol": sym, "optionType": rec.get("optionType", "put"), "side": "long",
+                                      "qty": rec["contracts"], "strike": rec["strike"], "expiration": rec["expiration"], "premium": rec["entryPerShare"], "openedAt": rec.get("openedAt")})
+            acct["cash"] -= rec["proceeds"]
             out.append(f"undid {text}")
         else:
             out.append(f"kept  {text} (a settlement, not undone)")

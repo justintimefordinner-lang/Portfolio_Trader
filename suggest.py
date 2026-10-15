@@ -20,6 +20,7 @@ The rules (the wheel study's combo 87 with 0.75-delta LEAPS):
     strike still paying 0.5% of basis a week (from the bridge's ladder)
   * on 100+ shares with no long call: a note to buy a ~0.75Δ ~450-day LEAPS
   * notes: a name over its cap, collateral beyond cash and the VIX allowance
+  * the portfolio hedge (H below): QQQ puts bought at highs, sold at 2.5x or 60 days out
 """
 from __future__ import annotations
 
@@ -46,6 +47,29 @@ RANK = {
     "vrpLo": 0.9, "vrpHi": 1.3,
     "w": {"liquidity": 0.40, "cushion": 0.35, "vrp": 0.25},
     "perRound": ((80, 3), (65, 2)),   # score at/above -> contracts per round (else 1)
+}
+
+
+# The portfolio hedge (backtested 2026-10-14, run 125): QQQ puts ~10% below spot,
+# 6-12 months out, notional half of committed capital, bought when the account is
+# at (within 5% of) its high with the VIX under 20 and at least a quarter invested;
+# held; the lot is sold at 2.5x its cost or inside 60 days of expiry; nothing is
+# rebought until the next high. Over 2022-2026 it lifted the return 46.9% -> 47.3%
+# a year, cut the worst drawdown 35.8% -> 33.0% and halved the 2022 loss. Env
+# overrides: TRADER_HEDGE=0 turns it off; HEDGE_FRAC/OTM/TP/VIX_MAX/MIN_INVESTED/
+# BAND/DTE_LO/DTE_HI/CLOSE_DTE tune it.
+def _envf(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+H = {
+    "on": (os.environ.get("TRADER_HEDGE", "1") or "").strip().lower() not in ("0", "false", "no", "off", ""),
+    "sym": "QQQ", "frac": _envf("HEDGE_FRAC", 0.5), "otm": _envf("HEDGE_OTM", 0.10), "tp": _envf("HEDGE_TP", 2.5),
+    "vixMax": _envf("HEDGE_VIX_MAX", 20.0), "minInvested": _envf("HEDGE_MIN_INVESTED", 0.25), "band": _envf("HEDGE_BAND", 0.05),
+    "dteLo": int(_envf("HEDGE_DTE_LO", 180)), "dteHi": int(_envf("HEDGE_DTE_HI", 365)), "closeDte": int(_envf("HEDGE_CLOSE_DTE", 60)),
 }
 
 
@@ -362,6 +386,88 @@ def _replacement(o: dict, picks: list, acct: dict, cap: dict) -> dict | None:
     return None
 
 
+def hedge_lots(acct: dict) -> list[dict]:
+    """The account's hedge: long puts on the hedge symbol."""
+    return [o for o in acct["options"] if o["symbol"] == H["sym"] and o["optionType"] == "put" and o["side"] == "long"]
+
+
+def hedge_high(ctx: dict, acct_id: str, tpv: float) -> float:
+    """The account's high-water mark, kept in ctx["hwm"] (trader.py persists it between
+    passes). A first sighting sets the mark at today's value, as the backtest did on day one."""
+    hwm = ctx.setdefault("hwm", {})
+    high = float((hwm.get(acct_id) or {}).get("high") or 0)
+    if tpv > high:
+        hwm[acct_id] = {"high": round(tpv, 2), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        high = tpv
+    return high
+
+
+def hedge_suggestions(ctx: dict, acct_id: str, acct: dict, cap: dict, vix: float | None, today: date, entries: bool) -> list[dict]:
+    """Exits every pass (2.5x cost, or inside 60 days of expiry); a buy in the entry
+    window when the account is near its high with cheap vol and a real book."""
+    if not H["on"]:
+        return []
+    out: list[dict] = []
+    lots = hedge_lots(acct)
+    for o in lots:
+        entry = float(o.get("entryPerShare") or 0)
+        mark = float(o.get("mark") or 0)
+        dte = _dte(o["expiration"], today)
+        ratio = mark / entry if entry > 0 else 0.0
+        why = None
+        if entry > 0 and ratio >= H["tp"]:
+            why = f"worth {ratio:.1f}× its {entry:.2f} cost (the rule sells at {H['tp']:g}×)"
+        elif 0 <= dte <= H["closeDte"]:
+            why = f"{dte} days from expiry (the rule closes inside {H['closeDte']})"
+        if why:
+            out.append({"key": f"hedge-close|{o['symbol']}|{o['strike']}|{o['expiration']}", "kind": "hedge-close", "symbol": o["symbol"],
+                        "strike": o["strike"], "expiration": o["expiration"], "qty": o["qty"], "price": round(mark, 2),
+                        "title": f"Sell {o['qty']} × {o['symbol']} ${o['strike']:g} put ({o['expiration'][5:]}) — hedge",
+                        "detail": f"The portfolio hedge is {why}; sell near {mark:.2f} for {_money(mark * MULT * o['qty'])}. "
+                                  f"Nothing is rebought until the account makes a new high.",
+                        "amount": round(mark * MULT * o["qty"], 2), "rule": "hedge exit"})
+    tpv = float((acct.get("summary") or {}).get("totalValue") or 0)
+    if tpv <= 0:
+        return out
+    high = hedge_high(ctx, acct_id, tpv)
+    if not entries:
+        return out
+    dd = (tpv - high) / high if high > 0 else 0.0
+    comm = committed_total(acct) - sum(float(o.get("mark") or 0) * MULT * o["qty"] for o in lots)   # the hedge is not what it insures
+    invested = comm / tpv
+    if not (dd >= -H["band"] and vix is not None and vix < H["vixMax"] and invested >= H["minInvested"]):
+        return out
+    hedge = (ctx.get("scan") or {}).get("hedge") or {}
+    spot = float(hedge.get("price") or 0)
+    puts = [p for p in hedge.get("puts") or [] if H["dteLo"] <= _dte(p["exp"], today) <= H["dteHi"] and float(p.get("ask") or 0) > 0]
+    if spot <= 0 or not puts:
+        return out
+    live = sum(o["qty"] for o in lots if _dte(o["expiration"], today) > H["closeDte"]) * MULT * spot
+    n = int((H["frac"] * comm - live) // (MULT * spot))
+    if n < 1:
+        return out
+    want = spot * (1 - H["otm"])
+    mid = (H["dteLo"] + H["dteHi"]) / 2
+    best = min(puts, key=lambda p: (abs(p["strike"] - want), abs(_dte(p["exp"], today) - mid)))
+    ask = float(best["ask"])
+    if ask * MULT * n > max(0.0, cap["freeCash"]):
+        n = int(max(0.0, cap["freeCash"]) // (ask * MULT))
+    if n < 1:
+        return out
+    dte = _dte(best["exp"], today)
+    standing = "at a new high" if dd >= 0 else f"{-dd * 100:.1f}% under its high"
+    out.append({"key": f"hedge|{H['sym']}|{best['strike']}|{best['exp']}", "kind": "hedge", "symbol": H["sym"],
+                "strike": best["strike"], "expiration": best["exp"], "qty": n, "price": round(ask, 2), "dte": dte,
+                "title": f"Buy {n} × {H['sym']} ${best['strike']:g} put ({best['exp'][5:]}, {dte}d) — portfolio hedge",
+                "detail": (f"The account is {standing} ({_money(tpv)} vs {_money(high)}) with the VIX at {vix:g} and {invested * 100:.0f}% invested: "
+                           f"the rule holds {H['sym']} puts ~{H['otm'] * 100:.0f}% below spot ({spot:,.2f}), {H['dteLo']}–{H['dteHi']} days out, "
+                           f"covering {H['frac'] * 100:.0f}% of the {_money(comm)} committed" + (f" ({_money(live)} already on)" if live else "")
+                           + f". Cost {_money(ask * MULT * n)} at the {ask:.2f} ask. Sell the lot at {H['tp']:g}× cost or {H['closeDte']} days before expiry; "
+                           f"buy again only after the next new high."),
+                "amount": round(ask * MULT * n, 2), "rule": "hedge at highs"})
+    return out
+
+
 def build(ctx: dict, account_id: str | None = None, today: date | None = None, entries: bool = True, cap: dict | None = None) -> list[dict]:
     """All suggestions, or with entries=False just the closes (what runs outside the entry window).
     `cap` overrides the capacity worked out from the snapshot (the paper account keeps its own)."""
@@ -422,6 +528,12 @@ def build(ctx: dict, account_id: str | None = None, today: date | None = None, e
                 "rule": "close at 50%",
                 "replacement": rep,
             })
+
+    # 1b. The portfolio hedge: its exits every pass; a buy in the entry window, which
+    #     takes its cash before the new puts are sized (the backtest hedged first).
+    hedged = hedge_suggestions(ctx, acct_id, acct, cap, vix, today, entries)
+    out += hedged
+    cap = {**cap, "freeCash": cap["freeCash"] - sum(s["amount"] for s in hedged if s["kind"] == "hedge")}
 
     if not entries:
         for s in out:

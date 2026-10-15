@@ -10,6 +10,11 @@ What it suggests:
 - at the top of each entry hour (11:00 to 15:00 ET, i.e. 9:00 to 1:00 Mountain): new cash-secured puts for every name the Quant
   scan qualifies, sized to the account; covered calls on 100+ share lots with no call on; notes when a name is over its cap or
   collateral exceeds cash. When a slot opens the trader asks the bridge for a fresh scan and picks it up within seconds of it landing.
+- the portfolio hedge (backtested 2026-10-14): QQQ puts ~10% below spot, 6–12 months out, notional half of committed capital,
+  bought when the account is at (within 5% of) its high with the VIX under 20 and at least a quarter invested; held; sold when
+  the lot is worth 2.5× its cost or inside 60 days of expiry; nothing rebought until the next new high. Over 2022–2026 it lifted
+  the return from 46.9% to 47.3% a year, cut the worst drawdown from 35.8% to 33.0% and halved the 2022 loss, for about 0.9% of
+  account value a year net. `TRADER_HEDGE=0` turns it off; `HEDGE_*` in trader.env tunes it.
 
 Every account the dashboard shows gets its own run — each Schwab login, imported or hand-entered accounts — and each notification
 names the account it is for.
