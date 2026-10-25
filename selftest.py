@@ -289,6 +289,12 @@ def main() -> int:
     check("7.5% under the high: no hedge, and the mark stands", not [s for s in suggest.build(ctx2, "HED", today=date.today(), entries=True) if s["kind"] == "hedge"] and ctx2["hwm"]["HED"]["high"] == 2_000_000)
     ctx3 = {**hctx(1_950_000), "hwm": {"HED": {"high": 2_000_000}}}
     check("2.5% under the high: near enough to hedge", any(s["kind"] == "hedge" for s in suggest.build(ctx3, "HED", today=date.today(), entries=True)))
+    ctx_h = hctx(2_000_000)
+    ctx_h["snapshot"]["data"]["HED"]["valueHistory"] = [{"label": "2026-01-05", "value": 2_400_000}, {"label": "2026-06-01", "value": 2_100_000}]
+    check("the value history sets the mark: $2.0M today is 16.7% under a $2.4M high -> no hedge, mark $2.4M", not [s for s in suggest.build(ctx_h, "HED", today=date.today(), entries=True) if s["kind"] == "hedge"] and ctx_h["hwm"]["HED"]["high"] == 2_400_000 and ctx_h["hwm"]["HED"]["source"] == "history", str(ctx_h.get("hwm")))
+    ctx_s = {**hctx(2_000_000), "hwm": {"HED": {"high": 1_900_000}}}
+    ctx_s["snapshot"]["data"]["HED"]["valueHistory"] = [{"label": "x", "value": 2_300_000}]
+    check("a stored mark below the history is raised to it (the install-day seed is forgotten)", not [s for s in suggest.build(ctx_s, "HED", today=date.today(), entries=True) if s["kind"] == "hedge"] and ctx_s["hwm"]["HED"]["high"] == 2_300_000, str(ctx_s.get("hwm")))
     check("VIX 22: no hedge", not [s for s in suggest.build(hctx(2_000_000, vix=22.0), "HED", today=date.today(), entries=True) if s["kind"] == "hedge"])
     check("outside the entry window: no hedge buy", not [s for s in suggest.build(hctx(2_000_000), "HED", today=date.today(), entries=False) if s["kind"] == "hedge"])
     lot = lambda mark, exp, qty=4: {"id": "hl", "kind": "other", "symbol": "SMH", "optionType": "put", "side": "long", "qty": qty, "strike": 540, "expiration": exp, "entryPerShare": 20.0, "mark": mark, "delta": -0.2, "theta": 0, "iv": 0.2, "breakeven": 520, "underlyingPrice": 600}

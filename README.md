@@ -11,7 +11,7 @@ What it suggests:
   scan qualifies, sized to the account; covered calls on 100+ share lots with no call on; notes when a name is over its cap or
   collateral exceeds cash. When a slot opens the trader asks the bridge for a fresh scan and picks it up within seconds of it landing.
 - the portfolio hedge (backtested 2026-10-14): SMH puts ~10% below spot, 6–12 months out, notional half of committed capital,
-  bought when the account is at (within 5% of) its high with the VIX under 20 and at least a quarter invested; held; sold when
+  bought when the account is at (within 5% of) its high — the best of the value history the bridge keeps — with the VIX under 20 and at least a quarter invested; held; sold when
   the lot is worth 2.5× its cost or inside 60 days of expiry; nothing rebought until the next new high. Over 2022–2026 it lifted
   the return from 46.9% to 47.6% a year, cut the worst drawdown from 35.8% to 31.1% and took the 2022 loss from 9.4% to 2.7%, for about 1.3% of
   account value a year net (SMH fits a chip-heavy book; `HEDGE_SYM=QQQ` for a broader one). `TRADER_HEDGE=0` turns it off; `HEDGE_*` tunes it.

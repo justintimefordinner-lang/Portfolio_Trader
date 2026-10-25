@@ -392,14 +392,19 @@ def hedge_lots(acct: dict) -> list[dict]:
             and (o.get("kind") or "other") in ("leap-put-hedge", "other")]
 
 
-def hedge_high(ctx: dict, acct_id: str, tpv: float) -> float:
-    """The account's high-water mark, kept in ctx["hwm"] (trader.py persists it between
-    passes). A first sighting sets the mark at today's value, as the backtest did on day one."""
+def hedge_high(ctx: dict, acct_id: str, acct: dict, tpv: float) -> float:
+    """The account's high-water mark: the best of the value history the bridge keeps, the
+    mark stored from earlier passes (ctx["hwm"], persisted by trader.py) and today. The
+    history is what makes it a real high and not the day the trader was installed: the
+    first version seeded the mark at that day's value, so an account 20% under its true
+    high hedged at once. With no history at all the mark starts at today's value."""
     hwm = ctx.setdefault("hwm", {})
-    high = float((hwm.get(acct_id) or {}).get("high") or 0)
-    if tpv > high:
-        hwm[acct_id] = {"high": round(tpv, 2), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-        high = tpv
+    stored = float((hwm.get(acct_id) or {}).get("high") or 0)
+    hist = max((float(p.get("value") or 0) for p in (acct.get("valueHistory") or []) if isinstance(p, dict)), default=0.0)
+    high = max(stored, hist, tpv)
+    if high > stored:
+        hwm[acct_id] = {"high": round(high, 2), "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "source": "history" if hist >= tpv and hist > stored else "today"}
     return high
 
 
@@ -430,7 +435,7 @@ def hedge_suggestions(ctx: dict, acct_id: str, acct: dict, cap: dict, vix: float
     tpv = float((acct.get("summary") or {}).get("totalValue") or 0)
     if tpv <= 0:
         return out
-    high = hedge_high(ctx, acct_id, tpv)
+    high = hedge_high(ctx, acct_id, acct, tpv)
     if not entries:
         return out
     dd = (tpv - high) / high if high > 0 else 0.0

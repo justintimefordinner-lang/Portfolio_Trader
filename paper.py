@@ -390,6 +390,9 @@ def run(ctx: dict, data_dir: str, entries: bool, today: date, vix: float | None,
     trades += settle_expired(data_dir, acct, snap_acct, today, when)
     view = snap_acct or _synthetic(acct)
     ctx_paper = {**ctx, "snapshot": {"data": {PAPER_ID: view}}}
+    # The paper book's high-water mark starts at its starting cash, so a book that has not
+    # yet beaten what it was funded with is not "at a high" (its view has little history).
+    ctx.setdefault("hwm", {}).setdefault(PAPER_ID, {"high": CASH, "at": when, "source": "starting cash"})
     cap = capacity(acct, snap_acct, vix, suggest.sizing(ctx, PAPER_ID))
     sug = suggest.build(ctx_paper, PAPER_ID, today=today, entries=entries, cap=cap)
     traded_today = {t.get("symbol") for t in trades if t.get("kind") == "csp" and str(t.get("at", ""))[:10] == today.isoformat()}
